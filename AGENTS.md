@@ -1,13 +1,13 @@
 # Developing `herdr-mods`
 
 This repository contains shareable Herdr layouts and mods (`tmux-vim/` and `copy-mode/`).
-Herdr runs live from `~/.config/herdr-app` (`C:\Users\barry\.config\herdr-app`).
+Herdr runs live from `~/.config/herdr-app` (`~\.config\herdr-app`).
 
 ## First Step for Any Agent
 
 Before editing any mod, layout, or keybinding, read:
-1. `C:\Users\barry\.config\herdr-app\AGENTS.md` — Herdr's full architecture, layout, keybinding, and mod rules.
-2. `C:\Users\barry\.config\herdr-app\herdr.d.ts` and `C:\Users\barry\.config\herdr-app\gpui-kit.d.ts` — The exact TypeScript definitions for the installed version of Herdr.
+1. `~\.config\herdr-app\AGENTS.md` — Herdr's full architecture, layout, keybinding, and mod rules.
+2. `~\.config\herdr-app\herdr.d.ts` and `~\.config\herdr-app\gpui-kit.d.ts` — The exact TypeScript definitions for the installed version of Herdr.
 
 ## Packages in This Repo
 
