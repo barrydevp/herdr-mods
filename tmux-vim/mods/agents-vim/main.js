@@ -108,7 +108,9 @@ export default class Agents extends View {
         }
       }
     });
-    cx.timer.every(30000, (cx) => cx.notify());
+    cx.timer.every(30000, (cx) => {
+      if (window().active && Object.keys(this.changed).length) cx.notify();
+    });
   }
 
   // Stamps agents whose state changed. Done and idle count as one: looking at a
@@ -131,6 +133,7 @@ export default class Agents extends View {
   // Keep offline pins until their terminal returns, and keep each pending until
   // core echoes the label so a failed write doesn't erase the old pin.
   migratePins(all) {
+    if (!this.pendingPins.length) return;
     const listed = new Map(all.filter((t) => t.state === "live").map((t) => [t.address, t]));
     const pending = this.pendingPins.filter((address) => {
       const terminal = listed.get(address);
@@ -187,13 +190,13 @@ export default class Agents extends View {
   }
 
   // Live sub-agents of `addr`, depth first, each with the tree lines in front of it.
-  tree(all, addr, lead = []) {
-    const kids = all.filter((k) => k.parent === addr && k.state === "live");
+  tree(kidsByParent, addr, lead = []) {
+    const kids = (kidsByParent instanceof Map ? kidsByParent.get(addr) : kidsByParent.filter((k) => k.parent === addr && k.state === "live")) ?? [];
     return kids.flatMap((k, i) => {
       const last = i === kids.length - 1;
       return [
         { t: k, lines: [...lead, last ? "└" : "├"] },
-        ...this.tree(all, k.address, [...lead, last ? "" : "│"]),
+        ...this.tree(kidsByParent, k.address, [...lead, last ? "" : "│"]),
       ];
     });
   }
@@ -240,22 +243,19 @@ export default class Agents extends View {
   }
 
   watchFocus(cx) {
+    const wasFocused = Boolean(this.handle?.is_focused());
     this.handle.focus();
-    cx.notify();
-    cx.timer.after(25, (cx) => {
-      this.handle.focus();
-      cx.notify();
-    });
+    if (!wasFocused) cx.notify();
     if (this.watchingFocus) return;
     this.watchingFocus = true;
     cx.spawn(async (cx) => {
-      await cx.sleep(35);
-      this.handle.focus();
-      cx.notify();
-      await cx.sleep(60);
-      cx.notify();
+      await cx.sleep(30);
+      if (!this.handle?.is_focused()) {
+        this.handle.focus();
+        cx.notify();
+      }
       while (this.handle?.is_focused()) {
-        await cx.sleep(80);
+        await cx.sleep(120);
       }
       this.watchingFocus = false;
       cx.notify();
@@ -385,20 +385,35 @@ export default class Agents extends View {
     const shown = focused()?.agent;
     const now = Date.now();
     this.track(list, now);
+    const kidsByParent = new Map();
+    for (const k of all) {
+      if (k.state === "live" && k.parent) {
+        let arr = kidsByParent.get(k.parent);
+        if (!arr) { arr = []; kidsByParent.set(k.parent, arr); }
+        arr.push(k);
+      }
+    }
+    const trees = new Map(list.map((a) => [a.address, this.tree(kidsByParent, a.address)]));
+    const treeOf = (a) => trees.get(a.address) ?? [];
     // A kept sub-agent (one with a pane) is in agents() too: where a tree shows
     // it, it gets no row of its own, unless it's pinned.
-    const nested = new Set(collapsed ? [] : list.flatMap((a) => this.tree(all, a.address).map((s) => s.t.address)));
+    const nested = new Set(collapsed ? [] : list.flatMap((a) => treeOf(a).map((s) => s.t.address)));
     list = list.filter((a) => a.pinned || !nested.has(a.address));
     const tabCounts = new Map();
     for (const a of list) tabCounts.set(a.tab, (tabCounts.get(a.tab) ?? 0) + 1);
     const byPriority = sort.id === "priority";
-    const urgency = new Map(list.map((a) => [a.address, Math.max(this.rank(a), ...this.tree(all, a.address).map((s) => RANK[kidStatus(s.t, this.listed)] ?? 0))]));
+    const urgency = new Map(list.map((a) => [a.address, Math.max(this.rank(a), ...treeOf(a).map((s) => RANK[kidStatus(s.t, this.listed)] ?? 0))]));
     const rankOf = (a) => urgency.get(a.address);
     if (byPriority) list = [...list].sort((x, y) => rankOf(y) - rankOf(x) || this.since(y) - this.since(x) || y.seq - x.seq);
     const pinned = list.filter((a) => a.pinned);
     const rest = list.filter((a) => !a.pinned);
     list = [...pinned, ...rest];
-    setAgentOrder(list.map((a) => a.address));
+    const order = list.map((a) => a.address);
+    const orderKey = order.join("\0");
+    if (orderKey !== this.lastAgentOrder) {
+      this.lastAgentOrder = orderKey;
+      setAgentOrder(order);
+    }
 
     // Groups in list order: spaces (grouped) or priority sections. Agents of a
     // space are next to each other in agents(), so neighbours make a group.
@@ -423,7 +438,7 @@ export default class Agents extends View {
         visualRow++; // group header
         if (this.folded.has(g.id)) continue;
         for (const a of g.members) {
-          const subs = this.tree(all, a.address);
+          const subs = treeOf(a);
           this.rowIndex.set(a.address, visualRow++);
           navItems.push({ address: a.address, pane: a.pane, pinned: a.pinned, isSub: false, hasSubs: subs.length > 0, groupId: g.id });
           if (!this.folded.has(a.address)) {
@@ -441,7 +456,7 @@ export default class Agents extends View {
     }
 
     const withKids = (a, i) => {
-      const subs = collapsed ? [] : this.tree(all, a.address);
+      const subs = collapsed ? [] : treeOf(a);
       const r = row(a, i, subs);
       if (this.folded.has(a.address)) return [r];
       return [r, ...subs.map((s) => this.subRow(t, s, shown, byPriority, hasFocus))];
@@ -555,9 +570,11 @@ export default class Agents extends View {
         .cursor_pointer()
         .hover((s) => s.bg(t.hover))
         .on_hover((on, cx) => {
-          if (on) this.hovered = a.address;
-          else if (this.hovered === a.address) this.hovered = null;
-          cx.notify();
+          const next = on ? a.address : this.hovered === a.address ? null : this.hovered;
+          if (next !== this.hovered) {
+            this.hovered = next;
+            cx.notify();
+          }
         })
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_click(() => {
@@ -616,7 +633,7 @@ export default class Agents extends View {
       .track_focus(this.handle)
       .on_key_down((e, cx) => this.onKey(e, cx))
       .on_mouse_down("left", (_e, cx) => this.watchFocus(cx))
-      .on_mouse_down_out((_e, cx) => cx.notify())
+      .on_mouse_down_out((_e, cx) => { if (this.handle?.is_focused()) cx.notify(); })
       .size_full()
       .min_h(0)
       .bg(t.chrome)

@@ -7,22 +7,26 @@ import { agents, checking, spaces, terminals, run, hc, theme, settings, props, c
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
 
 const PROJECT_COLORS = ["ansi6", "ansi3", "ansi4", "ansi5", "ansi2", "ansi1"];
-function spaceColors() {
-  const ids = new Set(spaces().map((p) => p.id));
-  const kept = Object.fromEntries(Object.entries(shared("space.colors") ?? {}).filter(([id]) => ids.has(id)));
-  let changed = Object.keys(kept).length !== Object.keys(shared("space.colors") ?? {}).length;
-  for (const p of spaces()) {
+function spaceColors(sp) {
+  const raw = shared("space.colors") ?? {};
+  const ids = new Set(sp.map((p) => p.id));
+  const kept = Object.fromEntries(Object.entries(raw).filter(([id]) => ids.has(id)));
+  let changed = Object.keys(kept).length !== Object.keys(raw).length;
+  const counts = { ansi6: 0, ansi3: 0, ansi4: 0, ansi5: 0, ansi2: 0, ansi1: 0 };
+  for (const v of Object.values(kept)) if (v in counts) counts[v]++;
+  for (const p of sp) {
     if (kept[p.id] || p.name === "~") continue;
-    const uses = (c) => Object.values(kept).filter((v) => v === c).length;
-    kept[p.id] = PROJECT_COLORS.reduce((best, c) => (uses(c) < uses(best) ? c : best));
+    const best = PROJECT_COLORS.reduce((b, c) => (counts[c] < counts[b] ? c : b));
+    kept[p.id] = best;
+    counts[best]++;
     changed = true;
   }
   if (changed) setShared("space.colors", kept);
   return kept;
 }
-function spaceColor(t, p) {
+function spaceColor(t, p, colors) {
   if (p.name === "~") return t.dim;
-  const c = spaceColors()[p.id] ?? PROJECT_COLORS[0];
+  const c = colors[p.id] ?? PROJECT_COLORS[0];
   return c.startsWith("#") ? c : (MARK[c] ?? t[c]);
 }
 
@@ -59,20 +63,32 @@ export default class PickerVim extends View {
     if (props()?.overlay) closeOverlay(props().overlay);
   }
 
-  rows() {
+  rows(sp = spaces()) {
     const f = this.filter.toLowerCase();
-    const all = agents();
-    const live = terminals().filter((x) => x.state === "live");
+    const byTab = new Map();
+    for (const a of agents()) {
+      let arr = byTab.get(a.tab);
+      if (!arr) { arr = []; byTab.set(a.tab, arr); }
+      arr.push(a);
+    }
+    const kidsByParent = new Map();
+    for (const x of terminals()) {
+      if (x.state === "live" && x.parent) {
+        let arr = kidsByParent.get(x.parent);
+        if (!arr) { arr = []; kidsByParent.set(x.parent, arr); }
+        arr.push(x.address);
+      }
+    }
     const teamOf = (addrs) => {
       let n = 0;
-      const walk = (a) => live.filter((x) => x.parent === a).forEach((k) => (n++, walk(k.address)));
+      const walk = (a) => (kidsByParent.get(a) ?? []).forEach((k) => (n++, walk(k)));
       addrs.forEach(walk);
       return n;
     };
-    const groups = spaces().map((w) => {
+    const groups = sp.map((w) => {
       const ctxs = w.tabs
         .map((ctx) => {
-          const mine = all.filter((a) => a.tab === ctx.id);
+          const mine = byTab.get(ctx.id) ?? [];
           return { w, ctx, mine, team: teamOf(mine.map((a) => a.address)) };
         })
         .filter((c) => !f || [w.name, c.ctx.name, ...c.mine.map((a) => a.program?.name ?? "")].join(" ").toLowerCase().includes(f));
@@ -119,15 +135,19 @@ export default class PickerVim extends View {
 
   render() {
     const t = theme();
-    const rows = this.rows();
+    const sp = spaces();
+    const colors = spaceColors(sp);
+    const rows = this.rows(sp);
     const pickable = rows.filter((r) => r.kind !== "head");
     if (this.at === null) this.at = Math.max(0, pickable.findIndex((r) => r.kind === "ctx" && r.w.active && r.ctx.active));
     this.at = Math.min(this.at, Math.max(0, pickable.length - 1));
     const sel = pickable[this.at];
     const H = { head: 29, earlier: 35, new: 36, ctx: 32, space: 32 };
     const tops = [];
+    const rowIdx = new Map();
     let y = 0;
-    rows.forEach((r) => {
+    rows.forEach((r, i) => {
+      rowIdx.set(r, i);
       tops.push(y);
       y += H[r.kind] ?? 32;
     });
@@ -136,7 +156,7 @@ export default class PickerVim extends View {
     const fixed = total > height;
     const maxScroll = Math.max(0, total - height);
     this.scroll = Math.max(0, Math.min(this.scroll, maxScroll));
-    const si = rows.indexOf(sel);
+    const si = rowIdx.get(sel) ?? -1;
     if (si >= 0) {
       if (tops[si] < this.scroll) this.scroll = tops[si];
       if (tops[si] + (H[sel.kind] ?? 32) > this.scroll + height) this.scroll = tops[si] + (H[sel.kind] ?? 32) - height;
@@ -158,7 +178,7 @@ export default class PickerVim extends View {
           .text_size(11)
           .font_semibold()
           .text_color(t.dim)
-          .child(h_flex().size(18).rounded(5).bg(spaceColor(t, r.w)).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...r.w.name][0]?.toUpperCase() ?? "?"))
+          .child(h_flex().size(18).rounded(5).bg(spaceColor(t, r.w, colors)).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...r.w.name][0]?.toUpperCase() ?? "?"))
           .child(r.w.name);
       }
       if (r.kind === "earlier") {
@@ -290,8 +310,11 @@ export default class PickerVim extends View {
         v_flex()
           .id("pk-list")
           .on_size_change((size, cx) => {
-            this.listHeight = size.height / settings().zoom;
-            cx.notify();
+            const next = size.height / settings().zoom;
+            if (Math.abs((this.listHeight ?? 0) - next) > 0.5) {
+              this.listHeight = next;
+              cx.notify();
+            }
           })
           .h(Math.min(320, total))
           .min_h(0)
@@ -299,8 +322,8 @@ export default class PickerVim extends View {
           .when(fixed, (el) =>
             el.overflow_hidden().on_scroll_wheel((e, cx) => {
               this.scroll = Math.max(0, Math.min(this.scroll - e.delta.y, maxScroll));
-              while (this.at < pickable.length - 1 && tops[rows.indexOf(pickable[this.at])] < this.scroll) this.at++;
-              while (this.at > 0 && tops[rows.indexOf(pickable[this.at])] + (H[pickable[this.at].kind] ?? 32) > this.scroll + height) this.at--;
+              while (this.at < pickable.length - 1 && tops[rowIdx.get(pickable[this.at])] < this.scroll) this.at++;
+              while (this.at > 0 && tops[rowIdx.get(pickable[this.at])] + (H[pickable[this.at].kind] ?? 32) > this.scroll + height) this.at--;
               cx.notify();
             }),
           )

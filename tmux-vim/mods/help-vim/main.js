@@ -28,6 +28,10 @@ export default class HelpVim extends View {
   init(_props, cx) {
     this.filter = "";
     this.at = 0;
+    this.allKeys = keys().map((k) => {
+      const text = label(k.action);
+      return { ...k, text, lowerKeys: k.keys.toLowerCase(), lowerText: text.toLowerCase() };
+    });
     this.input = InputState.new({ placeholder: "Type to filter…" });
     this.input.on("change", (_e, cx) => {
       this.filter = this.input.value();
@@ -48,7 +52,8 @@ export default class HelpVim extends View {
   render() {
     const t = theme();
     const f = this.filter.toLowerCase();
-    const all = keys().filter((k) => !f || k.keys.includes(f) || label(k.action).includes(f));
+    const source = this.allKeys ?? [];
+    const all = f ? source.filter((k) => k.lowerKeys.includes(f) || k.lowerText.includes(f)) : source;
     const seen = new Set();
     const groups = GROUPS.map(([name, re]) => {
       const rows = all.filter((k) => !seen.has(k) && re.test(k.action) && (seen.add(k) || true));
@@ -83,7 +88,7 @@ export default class HelpVim extends View {
               cx.notify();
             })
             .child(div().w(190).text_color(t.accent).child(k.keys + (k.section !== "global" ? `  (${k.section})` : "")))
-            .child(div().text_color(t.foreground).child(label(k.action))),
+            .child(div().text_color(t.foreground).child(k.text)),
         );
       }
     }

@@ -79,10 +79,8 @@ export default class CopyMode extends View {
             mode: "cell",
           });
         }
-        cx.notify();
       });
     }
-    cx.notify();
   }
 
   setMode(next, cx) {

@@ -20,10 +20,22 @@ function find(node, id) {
 const narrow = () => (find(layout(), "sidebar")?.size?.px ?? Infinity) < 160;
 
 // Where a space is now: its first terminal's live folder, else where it was made.
-// `ps`: panes(), read once by the caller (each read copies every pane).
-function place(s, ps) {
+// `firstCwd`: map of tabId -> first non-null cwd, or a panes() array.
+function place(s, firstCwd) {
+  if (firstCwd instanceof Map) {
+    for (const c of s.tabs ?? []) {
+      const cwd = firstCwd.get(c.id);
+      if (cwd) return cwd;
+    }
+    return s.folder;
+  }
   const tabs = new Set((s.tabs ?? []).map((c) => c.id));
-  return ps.find((p) => tabs.has(p.tab) && p.cwd)?.cwd || s.folder;
+  return firstCwd.find((p) => tabs.has(p.tab) && p.cwd)?.cwd || s.folder;
+}
+function tabCwds(ps) {
+  const m = new Map();
+  for (const p of ps) if (p.cwd && !m.has(p.tab)) m.set(p.tab, p.cwd);
+  return m;
 }
 const rowHeight = ({ tree }) => (tree ? 28 : 30);
 const RAIL_CELL = 32;
@@ -31,7 +43,7 @@ const RAIL_CELL = 32;
 // stays readable instead of turning into an ellipsis next to a long branch.
 const SIDE_MIN = 48;
 const railCell = (el) => h_flex().flex_none().justify_center().child(el);
-const where = (s, ps) => JSON.stringify([s.machine ?? null, place(s, ps)]);
+const where = (s, cwds) => JSON.stringify([s.machine ?? null, place(s, cwds)]);
 const base = (path) => path.replace(/\/+$/, "").split("/").pop();
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
 // for this often, in repos the list shows, while the window is in front.
@@ -125,9 +137,18 @@ export default class Spaces extends View {
   // a machine that is back, and repos in view whose fallback is due.
   due(now, sp, ps) {
     // Moved there: what it knew of that place may be old.
+    const cwds = tabCwds(ps);
     const at = {};
-    for (const s of sp) at[s.id] = where(s, ps);
-    const keys = new Set(Object.values(at).filter((k) => JSON.parse(k)[1]));
+    for (const s of sp) at[s.id] = where(s, cwds);
+    const parsed = new Map();
+    const keys = new Set();
+    for (const k of Object.values(at)) {
+      if (!parsed.has(k)) {
+        const pair = JSON.parse(k);
+        parsed.set(k, pair);
+        if (pair[1]) keys.add(k);
+      }
+    }
     for (const k of Object.keys(this.git)) if (!keys.has(k)) {
       delete this.git[k];
       delete this.checked[k];
@@ -152,13 +173,13 @@ export default class Spaces extends View {
     this.busy = busy;
     for (const m of machines()) {
       const ready = m.layout === "ready";
-      if (ready && this.ready[m.name] === false) for (const k of keys) if (JSON.parse(k)[0] === m.name) due.add(k);
+      if (ready && this.ready[m.name] === false) for (const k of keys) if (parsed.get(k)[0] === m.name) due.add(k);
       this.ready[m.name] = ready;
     }
     if (window().active) {
       for (const k of keys) {
         const asks = this.git[k] || this.unsure.has(k);
-        if (asks && !this.folded.has(JSON.parse(k)[0]) && now - (this.checked[k] ?? 0) > FALLBACK) due.add(k);
+        if (asks && !this.folded.has(parsed.get(k)[0]) && now - (this.checked[k] ?? 0) > FALLBACK) due.add(k);
       }
     }
     return due;
@@ -172,8 +193,18 @@ export default class Spaces extends View {
 
   refreshMachines(cx) {
     cx.spawn(async cx => {
-      try { const r = await hc(["machine", "ls", "--json"]); if (r.code === 0) this.machines = (JSON.parse(r.stdout).machines ?? []).filter((m) => !m.temporary); } catch {}
-      cx.notify();
+      try {
+        const r = await hc(["machine", "ls", "--json"]);
+        if (r.code === 0) {
+          const next = (JSON.parse(r.stdout).machines ?? []).filter((m) => !m.temporary);
+          const key = JSON.stringify(next);
+          if (key !== this.machinesKey) {
+            this.machinesKey = key;
+            this.machines = next;
+            cx.notify();
+          }
+        }
+      } catch {}
     });
   }
 
@@ -314,11 +345,13 @@ export default class Spaces extends View {
   }
 
   // Spaces in order, each worktree space moved under its main checkout's.
-  ordered() {
-    const sp = spaces(), ps = panes();
-    const ready = (w) => this.shown.has(w.id) || where(w, ps) in this.git || Date.now() - (this.born[w.id] ??= Date.now()) > 1500;
+  ordered(sp, machs) {
+    const cwds = tabCwds(panes());
+    const now = Date.now();
+    const whereById = new Map(sp.map((w) => [w.id, where(w, cwds)]));
+    const ready = (w) => this.shown.has(w.id) || whereById.get(w.id) in this.git || now - (this.born[w.id] ??= now) > 1500;
     for (const w of sp) if (!this.shown.has(w.id) && ready(w)) this.shown.add(w.id);
-    const list = sp.map((w, i) => ({ w, i, g: this.git[where(w, ps)] ?? null }));
+    const list = sp.map((w, i) => ({ w, i, g: this.git[whereById.get(w.id)] ?? null }));
     const mains = new Set(list.filter((r) => r.g && !r.g.linked).map((r) => r.g.repo));
     const nested = (r) => r.g?.linked && mains.has(r.g.repo);
     const out = [];
@@ -335,43 +368,48 @@ export default class Spaces extends View {
     // write can lose a sync conflict: allow the echo to settle before retrying.
     const order = sp.map(w => w.id);
     const target = out.map(r => r.w.id);
-    const key = JSON.stringify([order, target, machines()]);
     if (order.every((id, i) => id === target[i])) {
       this.ordering = null;
-    } else if (this.ordering?.key !== key || this.orderingDue(Date.now())) {
-      const moved = new Set();
-      this.ordering = { key, at: Date.now(), machines: [] };
-      for (let i = 0; i < out.length; i++) {
-        const from = order.indexOf(out[i].w.id);
-        if (from === i) continue;
-        run("space.move", { id: out[i].w.id, index: i + 1 });
-        moved.add(out[i].w.machine ?? null);
-        order.splice(i, 0, order.splice(from, 1)[0]);
+    } else {
+      const key = JSON.stringify([order, target, machs]);
+      if (this.ordering?.key !== key || this.orderingDue(now)) {
+        const moved = new Set();
+        this.ordering = { key, at: now, machines: [] };
+        for (let i = 0; i < out.length; i++) {
+          const from = order.indexOf(out[i].w.id);
+          if (from === i) continue;
+          run("space.move", { id: out[i].w.id, index: i + 1 });
+          moved.add(out[i].w.machine ?? null);
+          order.splice(i, 0, order.splice(from, 1)[0]);
+        }
+        this.ordering.machines = [...moved];
       }
-      this.ordering.machines = [...moved];
     }
     return out.filter(r => this.shown.has(r.w.id));
   }
 
   // The rows, under a header per machine once one isn't this computer.
-  grouped(t, collapsed, hasFocus) {
-    const rows = this.ordered();
+  grouped(sp, t, collapsed, hasFocus, colors) {
+    const machs = machines();
+    const rows = this.ordered(sp, machs);
     const visibleRows = rows.filter((r) => !this.folded.has(r.w.machine ?? null));
     this.navIds = visibleRows.map((r) => r.w.id);
     this.rowIndex = new Map();
     if (!this.cursor || !this.navIds.includes(this.cursor)) {
-      this.cursor = spaces().find((s) => s.active)?.id ?? this.navIds[0] ?? null;
+      this.cursor = sp.find((s) => s.active)?.id ?? this.navIds[0] ?? null;
     }
-    const draw = (r) => (collapsed ? this.compact(r, t, hasFocus) : this.row(r, t, hasFocus));
+    const fromIndex = this.pressed === null ? -1 : sp.findIndex(s => s.id === this.pressed);
+    const pressedSpace = this.pressed === null ? null : sp[fromIndex] ?? null;
+    const draw = (r) => (collapsed ? this.compact(r, t, hasFocus) : this.row(r, t, hasFocus, colors, fromIndex, pressedSpace));
     // Where the active space's row lands among the children this returns: the list scrolls by its direct
     // children, and machine headers, login notes and loading rows count too.
     this.activeAt = -1;
     let before = 0;
     const remote = [...new Set([...rows.map(r => r.w.machine).filter(Boolean), ...this.machines.map(m => m.name), ...Object.keys(this.reconnecting)])].sort();
     const loading = m => {
-      const layout = machines().find(k => k.name === m)?.layout;
+      const layout = machs.find(k => k.name === m)?.layout;
       return layout === "loading" || (!layout && this.machines.some(k => k.name === m && k.state === "connected"))
-        || spaces().some(s => (s.machine ?? null) === m && !this.shown.has(s.id));
+        || sp.some(s => (s.machine ?? null) === m && !this.shown.has(s.id));
     };
     const loadingRow = m => h_flex().id(`machine-loading-${m ?? "local"}`).h(28).flex_none().px(collapsed ? 0 : 8).items_center().when(collapsed, el => el.justify_center()).text_size(12).text_color(t.dim).child(collapsed ? "…" : "Loading…");
     if (!remote.length) {
@@ -469,11 +507,9 @@ export default class Spaces extends View {
       .when(g.behind > 0, (el) => el.child(div().flex_none().text_color(t.ansi1).child(`\u2193${g.behind}`)));
   }
 
-  row({ w, i, g, tree }, t, hasFocus) {
+  row({ w, i, g, tree }, t, hasFocus, colors, fromIndex, pressedSpace) {
     const on = w.active;
     const isCursor = hasFocus && this.cursor === w.id;
-    const fromIndex = this.pressed === null ? -1 : spaces().findIndex(s => s.id === this.pressed);
-    const colors = shared("space.colors") ?? {};
     const color = colors[w.id] ?? "ansi6";
     const fill = color.startsWith("#") ? color : (MARK[color] ?? t[color]);
     return v_flex()
@@ -501,9 +537,10 @@ export default class Spaces extends View {
         this.cursor = w.id;
       })
       .on_mouse_move((_e, cx) => {
-        const source = spaces().find(s => s.id === this.pressed);
+        if (this.pressed === null) return;
+        const source = pressedSpace ?? spaces().find(s => s.id === this.pressed);
         const over = source && (source.machine ?? null) === (w.machine ?? null) ? w.id : null;
-        if (this.pressed !== null && this.over !== over) {
+        if (this.over !== over) {
           this.over = over;
           cx.notify();
         }
@@ -555,22 +592,19 @@ export default class Spaces extends View {
   }
 
   watchFocus(cx) {
+    const wasFocused = Boolean(this.handle?.is_focused());
     this.handle.focus();
-    cx.notify();
-    cx.timer.after(25, (cx) => {
-      this.handle.focus();
-      cx.notify();
-    });
+    if (!wasFocused) cx.notify();
     if (this.watchingFocus) return;
     this.watchingFocus = true;
     cx.spawn(async (cx) => {
-      await cx.sleep(35);
-      this.handle.focus();
-      cx.notify();
-      await cx.sleep(60);
-      cx.notify();
+      await cx.sleep(30);
+      if (!this.handle?.is_focused()) {
+        this.handle.focus();
+        cx.notify();
+      }
       while (this.handle?.is_focused()) {
-        await cx.sleep(80);
+        await cx.sleep(120);
       }
       this.watchingFocus = false;
       cx.notify();
@@ -711,17 +745,21 @@ export default class Spaces extends View {
     const hasFocus = Boolean(this.handle?.is_focused());
     const palette = ["ansi6", "ansi3", "ansi4", "ansi5", "ansi2", "ansi1"];
     const sp = spaces();
+    const rawColors = shared("space.colors") ?? {};
     const ids = new Set(sp.map(p => p.id));
-    const kept = Object.fromEntries(Object.entries(shared("space.colors") ?? {}).filter(([id]) => ids.has(id)));
-    let changed = Object.keys(kept).length !== Object.keys(shared("space.colors") ?? {}).length;
+    const kept = Object.fromEntries(Object.entries(rawColors).filter(([id]) => ids.has(id)));
+    let changed = Object.keys(kept).length !== Object.keys(rawColors).length;
+    const counts = { ansi6: 0, ansi3: 0, ansi4: 0, ansi5: 0, ansi2: 0, ansi1: 0 };
+    for (const v of Object.values(kept)) if (v in counts) counts[v]++;
     for (const p of sp) {
       if (kept[p.id] || p.name === "~") continue;
-      const uses = c => Object.values(kept).filter(v => v === c).length;
-      kept[p.id] = palette.reduce((best, c) => uses(c) < uses(best) ? c : best);
+      const best = palette.reduce((b, c) => counts[c] < counts[b] ? c : b);
+      kept[p.id] = best;
+      counts[best]++;
       changed = true;
     }
     if (changed) setShared("space.colors", kept);
-    const list = this.grouped(t, collapsed, hasFocus);
+    const list = this.grouped(sp, t, collapsed, hasFocus, kept);
     // Bring the active space into view when it, or its place in the list, changes; a row already in view stays put.
     const active = sp.find(p => p.active)?.id;
     if (active !== this.revealed || this.activeAt !== this.revealedAt) {
@@ -734,7 +772,7 @@ export default class Spaces extends View {
       .track_focus(this.handle)
       .on_key_down((e, cx) => this.onKey(e, cx))
       .on_mouse_down("left", (_e, cx) => this.watchFocus(cx))
-      .on_mouse_down_out((_e, cx) => cx.notify())
+      .on_mouse_down_out((_e, cx) => { if (this.handle?.is_focused()) cx.notify(); })
       .size_full()
       .min_h(0)
       .bg(t.chrome)
@@ -749,8 +787,8 @@ export default class Spaces extends View {
           .on_click(() => run("space.new")).child(svg("mods/workspace-chrome/plus.svg").size(14))))
       .child(v_flex().flex_1().min_h(0).px(collapsed ? 0 : 8).pb(14).overflow_y_scrollbar().mode("always").track_scroll(this.scroll)
         // A block above (another mod's) growing, or the window resizing, shrinks this list and can push the active space out.
-        .on_size_change((_size, cx) => { if (this.activeAt >= 0) { this.scroll.scroll_to_item(this.activeAt); cx.notify(); } })
-        .on_mouse_up("left", (_e, cx) => { this.pressed = null; cx.notify(); })
+        .on_size_change(() => { if (this.activeAt >= 0) this.scroll.scroll_to_item(this.activeAt); })
+        .on_mouse_up("left", (_e, cx) => { if (this.pressed !== null) { this.pressed = null; cx.notify(); } })
         .children(list));
   }
 }

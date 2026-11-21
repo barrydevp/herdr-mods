@@ -68,7 +68,8 @@ function titleOf(name) {
 }
 
 function entries() {
-  const known = new Set(commands().map((c) => c.name));
+  const cmds = commands();
+  const known = new Set(cmds.map((c) => c.name));
   const mac = win()?.platform === "macos";
   const list = NAMED.filter(([n]) => known.has(n))
     .filter(([n]) => !(mac && n.startsWith("window.")))
@@ -78,18 +79,15 @@ function entries() {
     list.push({ name: "layout.switch", args: { name: l }, group: "Layout", title: `Layout: ${t}`, words: `look ${l}` });
   }
   const named = new Set(NAMED.map(([n]) => n));
-  for (const c of commands()) {
+  for (const c of cmds) {
     if (named.has(c.name) || HIDDEN.has(c.name) || c.args.some((a) => a.required && a.name !== "name")) continue;
     list.push({ name: c.name, args: {}, ...titleOf(c.name), words: c.about });
   }
-  return list.map((e) => ({ ...e, id: `${e.name}:${JSON.stringify(e.args)}` }));
-}
-
-function keyOf(e, bound) {
-  const v = Object.values(e.args)[0];
-  const want = v === undefined ? e.name : `${e.name}:${v}`;
-  const k = bound.find((b) => b.section === "global" && b.action === want);
-  return k ? k.keys : null;
+  return list.map((e) => {
+    const v = Object.values(e.args)[0];
+    const want = v === undefined ? e.name : `${e.name}:${v}`;
+    return { ...e, id: `${e.name}:${JSON.stringify(e.args)}`, want };
+  });
 }
 
 function keyParts(k) {
@@ -117,6 +115,7 @@ function fuzzy(q, text) {
 export default class PaletteVim extends View {
   init(_props, cx) {
     this.query = "";
+    this.allEntries = entries();
     this.input = InputState.new({ placeholder: "Type a command…" });
     this.input.on("change", (_e, cx) => {
       this.query = this.input.value();
@@ -163,24 +162,27 @@ export default class PaletteVim extends View {
   }
 
   rows() {
-    const all = entries();
+    const all = this.allEntries ??= entries();
     const q = this.query.trim().toLowerCase().replace(/\s+/g, "");
     if (!q) {
-      const recent = this.recent.map((id) => all.find((e) => e.id === id)).filter(Boolean).slice(0, 5);
-      const rest = GROUPS.slice(1).flatMap((g) => all.filter((e) => e.group === g && !recent.includes(e)));
-      const others = all.filter((e) => !GROUPS.includes(e.group) && !recent.includes(e));
+      const byId = new Map(all.map((e) => [e.id, e]));
+      const recent = this.recent.map((id) => byId.get(id)).filter(Boolean).slice(0, 5);
+      const recentSet = new Set(recent);
+      const rest = GROUPS.slice(1).flatMap((g) => all.filter((e) => e.group === g && !recentSet.has(e)));
+      const others = all.filter((e) => !GROUPS.includes(e.group) && !recentSet.has(e));
       return [...recent.map((e) => ({ e, head: "Recent" })), ...[...rest, ...others].map((e) => ({ e, head: e.group }))];
     }
-    const rank = (e) => this.recent.indexOf(e.id);
+    const recentRank = new Map(this.recent.map((id, idx) => [id, idx]));
+    const rank = (e) => recentRank.get(e.id) ?? 99;
     return all
       .map((e) => {
         const title = fuzzy(q, e.title);
-        const more = fuzzy(q, `${e.group} ${e.title} ${e.name} ${e.words}`);
+        const more = title ? null : fuzzy(q, `${e.group} ${e.title} ${e.name} ${e.words}`);
         const best = title ?? (more && { score: more.score - 4, hits: [] });
         return best && { e, score: best.score, hits: best.hits };
       })
       .filter(Boolean)
-      .sort((a, b) => b.score - a.score || (rank(a.e) < 0 ? 99 : rank(a.e)) - (rank(b.e) < 0 ? 99 : rank(b.e)));
+      .sort((a, b) => b.score - a.score || rank(a.e) - rank(b.e));
   }
 
   title(t, text, hits, on) {
@@ -204,7 +206,10 @@ export default class PaletteVim extends View {
   render() {
     const t = theme();
     const rows = this.rows();
-    const bound = keys();
+    const keyMap = new Map();
+    for (const b of keys()) {
+      if (b.section === "global" && !keyMap.has(b.action)) keyMap.set(b.action, b.keys);
+    }
     this.at = Math.min(this.at, Math.max(0, rows.length - 1));
     const tops = [];
     let y = 0;
@@ -236,7 +241,7 @@ export default class PaletteVim extends View {
       if (head && visible(title, row)) list.push(place(h_flex(), title, row).px(14).pb(4).items_end().text_size(11).font_semibold().text_color(t.dim).child(r.head));
       if (!visible(row, row + ROW_H)) return;
       const on = i === this.at;
-      const k = keyOf(r.e, bound);
+      const k = keyMap.get(r.e.want) ?? null;
       list.push(
         place(h_flex(), row, row + ROW_H)
           .id(`pl-${i}`)

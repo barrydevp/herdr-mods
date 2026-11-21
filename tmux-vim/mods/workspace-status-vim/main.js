@@ -4,12 +4,16 @@ import { spaces, agents, theme, run, window, keys } from "herdr";
 
 export default class WorkspaceStatus extends View {
   hint() {
+    const b = keys().find((k) => k.section === "global" && (k.action === "mod.open:palette-vim" || k.action === "app.palette"));
+    const k = b?.keys ?? null;
+    if (k === this.lastKey && this.cachedHint) return this.cachedHint;
+    this.lastKey = k;
     const mac = window()?.platform === "macos";
     const mod = { cmd: mac ? "⌘" : "Ctrl+", ctrl: mac ? "⌃" : "Ctrl+", shift: mac ? "⇧" : "Shift+", alt: mac ? "⌥" : "Alt+", option: mac ? "⌥" : "Alt+" };
-    const b = keys().find((k) => k.section === "global" && (k.action === "mod.open:palette-vim" || k.action === "app.palette"));
-    const parts = b && b.keys.endsWith("--") ? [...b.keys.slice(0, -2).split("-"), "-"] : b?.keys.split("-");
+    const parts = k && k.endsWith("--") ? [...k.slice(0, -2).split("-"), "-"] : k?.split("-");
     const key = parts && parts.map((p) => mod[p.toLowerCase()] ?? p.toUpperCase()).join("");
-    return key ? `${key}  commands` : "commands";
+    this.cachedHint = key ? `${key}  commands` : "commands";
+    return this.cachedHint;
   }
 
   render() {
