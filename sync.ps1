@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = $PSScriptRoot
 $HerdrHome = if ($env:HERDR_APP_HOME) { $env:HERDR_APP_HOME } else { Join-Path $HOME ".config\herdr-app" }
-$Mods = @("spaces-vim", "agents-vim", "workspace-status-vim", "copy-mode", "help-vim")
+$Mods = @("spaces-vim", "agents-vim", "workspace-status-vim", "copy-mode", "help-vim", "picker-vim", "palette-vim")
 
 function Invoke-Check {
     foreach ($m in $Mods) {

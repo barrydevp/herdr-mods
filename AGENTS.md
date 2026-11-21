@@ -15,10 +15,12 @@ Before editing any mod, layout, or keybinding, read:
   - `layouts/main-vim.json`: Cloned `main` layout using `spaces-vim`, `agents-vim`, and `workspace-status-vim`.
   - `mods/spaces-vim/`: Focusable Spaces sidebar (`"focusable": true`) with `h/j/k/l` navigation and `watchFocus` focus ring management.
   - `mods/agents-vim/`: Focusable Agents sidebar (`"focusable": true`) with `h/j/k/l` navigation and `watchFocus` focus ring management.
-  - `mods/workspace-status-vim/`: Bottom status bar with integrated popup-free 500ms repeat-key controller (`REPEAT · 500ms`).
+  - `mods/workspace-status-vim/`: Bottom status bar showing `Alt+Shift+P  commands` for `palette-vim`.
   - `mods/copy-mode/`: Top status pill for tmux-style `copy-mode-vi` (`Ctrl-Space [`).
-  - `mods/help-vim/`: Top popup keybindings reference (`Ctrl-Space ?` / `Ctrl-?`) aligned with the picker/palette position.
-  - `keys.json`: `<Ctrl-Space>` tmux prefix bindings + `"alt-p": "mod.open:picker"`, `"alt-shift-p": "app.palette"`, `"ctrl-[": "send:\u001b"`.
+  - `mods/picker-vim/`: Top popup space/tab/agent picker (`Alt-P` / `Ctrl-Space w`) with Vim navigation (`Ctrl-N/P`, `Ctrl-D/U`, `Ctrl-[`).
+  - `mods/palette-vim/`: Top popup command palette (`Alt-Shift-P` / `Ctrl-Space :`) with Vim navigation (`Ctrl-N/P`, `Ctrl-D/U`, `Ctrl-[`).
+  - `mods/help-vim/`: Top popup keybindings reference (`Ctrl-Space ?` / `Ctrl-?`) with Vim navigation (`Ctrl-N/P`, `Ctrl-D/U`, `Ctrl-[`).
+  - `keys.json`: `<Ctrl-Space>` tmux prefix bindings + `"alt-p": "mod.open:picker-vim"`, `"alt-shift-p": "mod.open:palette-vim"`, `"ctrl-[": "send:\u001b[27u"`.
   - `RECIPE.md` & `preview.png`: Shareable recipe and screenshot for `herdr.dev/layouts`.
 - `copy-mode/`:
   - Standalone package of `mods/copy-mode/` (`main.js`, `mod.json`, `keys.json`, `RECIPE.md`, `preview.png`) for `herdr.dev/mods`.
