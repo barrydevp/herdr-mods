@@ -1,0 +1,119 @@
+// The keybind list (Herdr's prefix+?), grouped, filterable by typing.
+// Opens at the same top popup position as the picker (offset: 40, width: 640).
+
+import { View, div, svg } from "gpui-kit";
+import { v_flex, h_flex, InputState, Input } from "gpui-base";
+import { checking, keys, props, closeOverlay, theme } from "herdr";
+
+const GROUPS = [
+  ["spaces", /^space\.|^workspace-status-vim\.space-/],
+  ["tabs", /^tab\.|^workspace-status-vim\.tab-/],
+  ["panes", /^pane\.|^workspace-status-vim\.(pane|swap)-/],
+  ["agents", /^agent\./],
+  ["terminal", /^terminal\.|^send:|^mod\.open:copy-mode/],
+  ["window", /./],
+];
+
+function label(action) {
+  if (action.startsWith("send:")) return "type " + JSON.stringify(action.slice(5));
+  const [name, arg] = action.split(":");
+  const words = name.replace(/^workspace-status-vim\./, "").replace(/[._-]/g, " ");
+  return arg ? `${words} ${arg}` : words;
+}
+
+export default class HelpVim extends View {
+  init(_props, cx) {
+    this.filter = "";
+    this.input = InputState.new({ placeholder: "Type to filter…" });
+    this.input.on("change", (_e, cx) => {
+      this.filter = this.input.value();
+      cx.notify();
+    });
+    this.handle = cx.focus_handle();
+    if (checking()) return;
+    this.input.focus();
+    cx.timer.after(600, () => this.input.focus());
+  }
+
+  render() {
+    const t = theme();
+    const f = this.filter.toLowerCase();
+    const all = keys().filter((k) => !f || k.keys.includes(f) || label(k.action).includes(f));
+    const seen = new Set();
+    const groups = GROUPS.map(([name, re]) => {
+      const rows = all.filter((k) => !seen.has(k) && re.test(k.action) && (seen.add(k) || true));
+      return [name, rows];
+    }).filter(([, rows]) => rows.length > 0);
+    return v_flex()
+      .id("help")
+      .track_focus(this.handle)
+      .on_key_down((e) => {
+        if (e.key === "escape") return closeOverlay(props().overlay);
+      })
+      .w_full()
+      .h(430)
+      .min_h(0)
+      .p(18)
+      .gap(10)
+      .bg(t.popover)
+      .text_size(12)
+      .child(
+        h_flex()
+          .items_center()
+          .child(div().flex_1().text_size(15).font_semibold().text_color(t.foreground).child("Keybinds"))
+          .child(
+            div()
+              .id("help-esc")
+              .px(6)
+              .py(2)
+              .rounded(5)
+              .text_size(11)
+              .text_color(t.dim)
+              .cursor_pointer()
+              .hover((s) => s.bg(t.hover).text_color(t.foreground))
+              .on_click(() => closeOverlay(props().overlay))
+              .child("Esc"),
+          ),
+      )
+      .child(
+        h_flex()
+          .h(36)
+          .flex_none()
+          .px(10)
+          .gap(8)
+          .items_center()
+          .rounded(9)
+          .border_1()
+          .border_color(t.accent)
+          .bg(t.background)
+          .child(svg("mods/workspace-chrome/search.svg").size(15).text_color(t.dim))
+          .child(Input.new(this.input).flex_1().h_full().text_size(12.8).text_color(t.foreground)),
+      )
+      .child(
+        v_flex()
+          .flex_1()
+          .min_h(0)
+          .overflow_y_scrollbar()
+          .py(2)
+          .gap(10)
+          .children(
+            groups.map(([name, rows]) =>
+              v_flex()
+                .gap(2)
+                .child(div().text_size(11.5).font_medium().text_color(t.dim).child(name))
+                .children(
+                  rows.map((k) =>
+                    h_flex()
+                      .h(32)
+                      .px(8)
+                      .rounded(7)
+                      .items_center()
+                      .child(div().w(190).text_color(t.accent).child(k.keys + (k.section !== "global" ? `  (${k.section})` : "")))
+                      .child(div().text_color(t.foreground).child(label(k.action))),
+                  ),
+                ),
+            ),
+          ),
+      );
+  }
+}

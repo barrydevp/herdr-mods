@@ -1,0 +1,7 @@
+{
+  "global": {
+    "ctrl-space [": "mod.open:copy-mode",
+    "ctrl-space /": "terminal.search",
+    "ctrl-space ]": "terminal.paste"
+  }
+}

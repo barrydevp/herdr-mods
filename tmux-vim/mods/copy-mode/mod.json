@@ -1,0 +1,11 @@
+{
+  "place": "none",
+  "title": "Vim Copy Mode",
+  "overlay": {
+    "kind": "popup",
+    "at": "top",
+    "offset": 12,
+    "width": 580,
+    "height": 40
+  }
+}
