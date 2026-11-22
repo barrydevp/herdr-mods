@@ -1,6 +1,6 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { spaces, panes, agents, terminals, focused, theme, exec, hc, appHome, window, checking } from "herdr";
+import { spaces, panes, agents, terminals, focused, theme, exec, hc, appHome, window, checking, shared, setShared } from "herdr";
 
 const ICONS = {
   antigravity: { icon: "icons/antigravity.svg", tint: false },
@@ -199,6 +199,16 @@ export default class AgentUsageBar extends View {
             const parsed = JSON.parse(res.stdout.trim());
             if (parsed && typeof parsed === "object") {
               this.cache = { ...this.cache, ...parsed };
+              const prevTitles = shared("agent.titles") ?? {};
+              const nextTitles = { ...(typeof prevTitles === "object" && prevTitles ? prevTitles : {}) };
+              let titlesChanged = false;
+              for (const [tid, info] of Object.entries(parsed)) {
+                if (info?.title && nextTitles[tid] !== info.title) {
+                  nextTitles[tid] = info.title;
+                  titlesChanged = true;
+                }
+              }
+              if (titlesChanged) setShared("agent.titles", nextTitles);
             }
           }
         }

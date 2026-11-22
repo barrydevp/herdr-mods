@@ -136,6 +136,42 @@ def resolve_agy_conv_id(cwd):
     return None
 
 
+def clean_line(text, max_len=60):
+    if not text:
+        return ""
+    line = " ".join(str(text).strip().split())
+    if line.startswith("/") and " " in line:
+        line = line.lstrip("/")
+    if len(line) > max_len:
+        line = line[: max_len - 1].rstrip() + "…"
+    return line
+
+
+def extract_agy_first_prompt(conv_id):
+    if not conv_id:
+        return ""
+    t_path = os.path.join(AGY_DIR, "brain", conv_id, ".system_generated", "logs", "transcript.jsonl")
+    if not os.path.exists(t_path):
+        return ""
+    try:
+        with open(t_path, "r", encoding="utf-8", errors="ignore") as f:
+            for idx, raw_line in enumerate(f):
+                if idx > 20:
+                    break
+                d = json.loads(raw_line)
+                if d.get("type") == "USER_INPUT":
+                    content = d.get("content") or ""
+                    m = re.search(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", content, re.S)
+                    txt = m.group(1) if m else content
+                    for ln in txt.splitlines():
+                        ln = ln.strip()
+                        if ln:
+                            return clean_line(ln)
+    except Exception:
+        pass
+    return ""
+
+
 def get_agy_transcript_usage(conv_id):
     if not conv_id:
         return None
@@ -328,9 +364,16 @@ def query_agy(term_id, cwd, pid=None):
     pct_str = f"{used_pct:.1f}%".replace(".0%", "%") if 0 < used_pct < 10 else f"{int(round(used_pct))}%"
     ctx_val = f"{pct_str} ({fmt_tokens(used_tokens)} / {fmt_tokens(window_size)})"
 
+    title = clean_line((hook_data or {}).get("conversation_title") or (hook_data or {}).get("_resolved_title") or "")
+    if not title and conv_id:
+        title = extract_agy_first_prompt(conv_id)
+    if not title and cwd:
+        title = os.path.basename(str(cwd).rstrip("\\/"))
+
     return {
         "agent": "Antigravity",
         "agent_key": "antigravity",
+        "title": title,
         "model": format_agy_model(model_name),
         "context_value": ctx_val,
         "context_text": f"Context: {ctx_val}",
@@ -562,20 +605,43 @@ def query_claude(term_id, cwd, pid=None):
     window_size = 200000
     model_name = ""
     cost_usd = None
+    custom_title = ""
+    ai_title = ""
+    summary_title = ""
+    last_prompt = ""
+    last_user_msg = ""
 
     if session_file and os.path.exists(session_file):
         lines = read_tail_lines(session_file, 98304)
         for line in reversed(lines):
             try:
                 d = json.loads(line)
+                t = d.get("type")
                 # Stop scanning backwards if we hit a /clear command
-                if d.get("type") == "system" and d.get("subtype") == "local_command":
+                if t == "system" and d.get("subtype") == "local_command":
                     cmd_run = d.get("commandRun") or {}
                     if cmd_run.get("command") == "clear":
                         break
-                if cost_usd is None and d.get("type") == "cost-state":
+                if not custom_title and t == "custom-title":
+                    custom_title = clean_line(d.get("customTitle"))
+                elif not ai_title and t == "ai-title":
+                    ai_title = clean_line(d.get("aiTitle"))
+                elif not summary_title and t == "summary":
+                    summary_title = clean_line(d.get("summary"))
+                elif not last_prompt and t == "last-prompt":
+                    lp = (d.get("lastPrompt") or "").strip()
+                    if lp and not lp.startswith("/"):
+                        last_prompt = clean_line(lp.splitlines()[0])
+                elif not last_user_msg and t == "user" and not d.get("isMeta"):
+                    msg = d.get("message") or {}
+                    content = msg.get("content")
+                    if isinstance(content, str):
+                        txt = content.strip()
+                        if txt and not txt.startswith("<") and not txt.startswith("/"):
+                            last_user_msg = clean_line(txt.splitlines()[0])
+                if cost_usd is None and t == "cost-state":
                     cost_usd = d.get("totalCostUSD")
-                if used_tokens == 0 and d.get("type") == "assistant":
+                if used_tokens == 0 and t == "assistant":
                     msg = d.get("message") or {}
                     u = msg.get("usage")
                     if isinstance(u, dict):
@@ -586,10 +652,16 @@ def query_claude(term_id, cwd, pid=None):
                             + int(u.get("cache_read_input_tokens") or 0)
                             + int(u.get("output_tokens") or 0)
                         )
-                if used_tokens > 0 and cost_usd is not None:
-                    break
             except Exception:
                 pass
+
+    title = ""
+    for cand in (custom_title, ai_title, summary_title, last_user_msg, last_prompt):
+        if cand:
+            title = cand
+            break
+    if not title and cwd:
+        title = os.path.basename(str(cwd).rstrip("\\/"))
 
     if not model_name:
         cl_settings = read_json(os.path.join(CLAUDE_DIR, "settings.json")) or {}
@@ -652,6 +724,7 @@ def query_claude(term_id, cwd, pid=None):
     return {
         "agent": "Claude Code",
         "agent_key": "claude",
+        "title": title,
         "model": format_claude_model(model_name),
         "context_value": ctx_val,
         "context_text": f"Context: {ctx_val}",

@@ -2,7 +2,23 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { agents, checking, spaces, terminals, run, hc, theme, settings, props, closeOverlay, shared, setShared } from "herdr";
+import { agents, panes, checking, spaces, terminals, run, hc, theme, settings, props, closeOverlay, shared, setShared } from "herdr";
+
+const clean = (s) => (s ?? "").replace(/^[^\p{L}\p{N}\p{Ps}\p{Pi}]+/u, "").replace(/^\[ [!.] \] /, "").trim();
+
+function tabLabel(tab, lead, fallbackTitle = "") {
+  const prog = lead?.program?.name;
+  const base = tab.named ? tab.name : prog ?? tab.name;
+  if (!lead?.program?.agent) return base;
+  const check = (raw) => {
+    const live = clean(raw);
+    const path = /^[~/]|^[A-Za-z]:\\/.test((raw ?? "").replace(/^[^\p{L}\p{N}~/]+/u, ""));
+    const telling = live && live !== (lead?.terminal ?? lead?.address) && live !== prog && !path && !live.includes("@") && live.toLowerCase() !== lead?.program?.key;
+    return telling ? live : null;
+  };
+  const chosen = check(lead?.title) ?? check(fallbackTitle);
+  return (tab.name === prog || !tab.named) && chosen ? chosen : base;
+}
 
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
 
@@ -71,8 +87,12 @@ export default class PickerVim extends View {
       if (!arr) { arr = []; byTab.set(a.tab, arr); }
       arr.push(a);
     }
+    const allTerms = terminals();
+    const termByAddr = new Map(allTerms.map((x) => [x.address, x]));
+    const sharedTitles = shared("agent.titles") ?? {};
+    const allPanes = panes();
     const kidsByParent = new Map();
-    for (const x of terminals()) {
+    for (const x of allTerms) {
       if (x.state === "live" && x.parent) {
         let arr = kidsByParent.get(x.parent);
         if (!arr) { arr = []; kidsByParent.set(x.parent, arr); }
@@ -89,9 +109,13 @@ export default class PickerVim extends View {
       const ctxs = w.tabs
         .map((ctx) => {
           const mine = byTab.get(ctx.id) ?? [];
-          return { w, ctx, mine, team: teamOf(mine.map((a) => a.address)) };
+          const lead = mine[0] ?? allPanes.find((p) => p.tab === ctx.id && p.program?.agent) ?? allPanes.find((p) => p.tab === ctx.id);
+          const addr = lead?.terminal ?? lead?.address;
+          const fallback = (addr && (termByAddr.get(addr)?.report?.msg || sharedTitles[addr])) || "";
+          const displayName = tabLabel(ctx, lead, fallback);
+          return { w, ctx, displayName, mine, team: teamOf(mine.map((a) => a.address)) };
         })
-        .filter((c) => !f || [w.name, c.ctx.name, ...c.mine.map((a) => a.program?.name ?? "")].join(" ").toLowerCase().includes(f));
+        .filter((c) => !f || [w.name, c.ctx.name, c.displayName, ...c.mine.map((a) => a.program?.name ?? "")].join(" ").toLowerCase().includes(f));
       return { w, ctxs };
     });
     const busy = groups.filter((p) => p.w.status && p.ctxs.length);
@@ -232,7 +256,7 @@ export default class PickerVim extends View {
         .hover((s) => s.bg(t.hover))
         .on_click(() => this.go(r))
         .child(this.glyph(t, r.ctx.status))
-        .child(div().flex_1().truncate().text_color(t.foreground).when(here, (d) => d.font_semibold()).child(r.ctx.name))
+        .child(div().flex_1().truncate().text_color(t.foreground).when(here, (d) => d.font_semibold()).child(r.displayName ?? r.ctx.name))
         .when(r.ctx.status === "blocked", (el) => el.child(div().text_size(11).text_color(t.blocked).child("needs you")))
         .when(r.ctx.status === "done", (el) => el.child(div().text_size(11).text_color(t.done).child("finished")))
         .child(div().text_size(11).text_color(t.dim).child(who + (r.team ? `  +${r.team}` : "")));
