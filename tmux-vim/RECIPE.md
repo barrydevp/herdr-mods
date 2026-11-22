@@ -31,7 +31,7 @@ Tmux-style `<Ctrl-Space>` keybindings, Vim copy mode (`Ctrl-Space [`), top-cente
   - `Alt+Shift+P` (or `Ctrl+Space :`) opens `palette-vim` (command palette).
   - `Ctrl+Space ?` (or `Ctrl+?`) opens `help-vim` (keybindings list).
   - All three open at the same top popup position (`offset: 40, width: 640`) and support `Ctrl+N` / `Ctrl+P` to select next/previous, `Ctrl+D` / `Ctrl+U` to scroll half a page down/up, and `Ctrl+[` or `Esc` to close.
-- **Terminal Escape fix:** `"ctrl-[": "send:\u001b[27u"` in the `"terminal"` section of `keys.json` sends the Kitty `CSI u` Escape sequence (`\x1b[27u`), which works as Escape in both Neovim and Antigravity/Codex.
+- **Terminal Escape fix:** `"ctrl-[": "send:\u001b[27u"` in the `"terminal"` section of `keys.json` sends the Kitty keyboard protocol `Escape` sequence (`CSI 27 u`) so `Ctrl+[` acts as `Esc` inside TUI apps running in Kitty keyboard mode (e.g., Antigravity, Claude Code, Neovim).
 
 ## Built from
 

@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = $PSScriptRoot
 $HerdrHome = if ($env:HERDR_APP_HOME) { $env:HERDR_APP_HOME } else { Join-Path $HOME ".config\herdr-app" }
-$Mods = @("spaces-vim", "agents-vim", "workspace-status-vim", "copy-mode", "help-vim", "picker-vim", "palette-vim")
+$Mods = @("spaces-vim", "agents-vim", "workspace-status-vim", "agent-usage-vim", "copy-mode", "help-vim", "picker-vim", "palette-vim")
 
 function Invoke-Check {
     foreach ($m in $Mods) {
@@ -30,8 +30,7 @@ if ($Action -eq "apply") {
     Copy-Item "$RepoRoot\tmux-vim\keys.json" "$HerdrHome\keys.json" -Force
     foreach ($m in $Mods) {
         New-Item -ItemType Directory -Force -Path "$HerdrHome\mods\$m" | Out-Null
-        Copy-Item "$RepoRoot\tmux-vim\mods\$m\main.js" "$HerdrHome\mods\$m\main.js" -Force
-        Copy-Item "$RepoRoot\tmux-vim\mods\$m\mod.json" "$HerdrHome\mods\$m\mod.json" -Force
+        Copy-Item "$RepoRoot\tmux-vim\mods\$m\*" "$HerdrHome\mods\$m\" -Force
     }
     Write-Output "Applied C:\Dev\herdr-mods -> $HerdrHome"
     Invoke-Check
@@ -42,6 +41,9 @@ elseif ($Action -eq "pull") {
     foreach ($m in $Mods) {
         Copy-Item "$HerdrHome\mods\$m\main.js" "$RepoRoot\tmux-vim\mods\$m\main.js" -Force
         Copy-Item "$HerdrHome\mods\$m\mod.json" "$RepoRoot\tmux-vim\mods\$m\mod.json" -Force
+        Get-ChildItem "$HerdrHome\mods\$m\*.py" -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item $_.FullName "$RepoRoot\tmux-vim\mods\$m\$($_.Name)" -Force
+        }
     }
     Copy-Item "$HerdrHome\mods\copy-mode\main.js" "$RepoRoot\copy-mode\mods\copy-mode\main.js" -Force
     Copy-Item "$HerdrHome\mods\copy-mode\mod.json" "$RepoRoot\copy-mode\mods\copy-mode\mod.json" -Force

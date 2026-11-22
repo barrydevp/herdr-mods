@@ -15,6 +15,7 @@ Before editing any mod, layout, or keybinding, read:
   - `layouts/main-vim.json`: Cloned `main` layout using `spaces-vim`, `agents-vim`, and `workspace-status-vim`.
   - `mods/spaces-vim/`: Focusable Spaces sidebar (`"focusable": true`) with `h/j/k/l` navigation and `watchFocus` focus ring management.
   - `mods/agents-vim/`: Focusable Agents sidebar (`"focusable": true`) with `h/j/k/l` navigation and `watchFocus` focus ring management.
+  - `mods/agent-usage-vim/`: Status bar below the pane terminal showing active agent context usage on the left and account limit/quota status on the right (`agy`, `codex`, `claude`).
   - `mods/workspace-status-vim/`: Bottom status bar showing `Alt+Shift+P  commands` for `palette-vim`.
   - `mods/copy-mode/`: Top status pill for tmux-style `copy-mode-vi` (`Ctrl-Space [`).
   - `mods/picker-vim/`: Top popup space/tab/agent picker (`Alt-P` / `Ctrl-Space w`) with Vim navigation (`Ctrl-N/P`, `Ctrl-D/U`, `Ctrl-[`).

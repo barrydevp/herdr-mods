@@ -157,6 +157,16 @@
           "gap": 8
         },
         {
+          "id": "agent-usage",
+          "type": "block",
+          "content": {
+            "mod": "agent-usage-vim"
+          },
+          "size": {
+            "px": 26
+          }
+        },
+        {
           "id": "status",
           "type": "block",
           "content": {
