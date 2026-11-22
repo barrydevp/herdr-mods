@@ -6,6 +6,8 @@ import { spaces, panes, agents, terminals, focused, theme, exec, hc, appHome, wi
 // the sidebars show) less often.
 const TAB_EVERY = 4000;
 const ALL_EVERY = 30000;
+// An agent that is not working is asked about again only this often (its limits can still move).
+const IDLE_EVERY = 60000;
 
 // "5h 87% left (1h 59m)": the percentages in `color`, the rest in `rest`. Each piece is its
 // own text run, so spaces at a piece's edge become non-breaking to survive layout.
@@ -68,9 +70,11 @@ export default class AgentUsageBar extends View {
     this.busy = false;
     this.pendingRefresh = false;
     this.pendingAll = false;
+    this.pendingForce = false;
     this.py = {}; // machine ("" here) -> the Python 3 command that works there; null: none
     this.remote = {}; // machine -> { want, path } of its query.py copy
     this.src = null; // query.py's text, for copies on other machines
+    this.seen = {}; // terminal -> { key, stable, at } of its last query, to skip idle agents
     if (checking()) return;
     this.refresh(cx, true);
     cx.timer.every(TAB_EVERY, (cx) => {
@@ -238,26 +242,38 @@ export default class AgentUsageBar extends View {
     }
   }
 
-  refresh(cx, all = false) {
+  // What the bar shows, to redraw only when it changes (a redraw redraws every mod).
+  shownState() {
+    return JSON.stringify([this.cache, this.fgInfo, this.py]);
+  }
+
+  // `force` (a click): ask about every agent now, idle or not.
+  refresh(cx, all = false, force = false) {
     if (checking()) return;
     if (this.busy) {
       this.pendingRefresh = true;
       this.pendingAll ||= all;
+      this.pendingForce ||= force;
       return;
     }
     this.busy = true;
     cx.spawn(async (cx) => {
+      const before = this.shownState();
       try {
         if (all) this.prune();
         const addrs = this.collectCandidateTerminals(all);
+        const activity = {};
         for (const addr of addrs) {
           try {
             const r = await hc(["get", addr, "--json"]);
             if (r.code === 0 && r.stdout) {
               const info = JSON.parse(r.stdout);
-              if (info?.foreground) {
-                this.fgInfo[addr] = info.foreground;
-              }
+              const fg = info?.foreground;
+              if (fg) this.fgInfo[addr] = fg;
+              activity[addr] = {
+                working: info?.status?.state === "working",
+                key: [info?.turn, info?.status?.state, info?.status_ms, fg?.pid, fg?.cwd, fg?.name].join(":"),
+              };
             }
           } catch {
             // ignore individual hc get error
@@ -279,6 +295,13 @@ export default class AgentUsageBar extends View {
           const a = agentMap.get(addr);
           const fg = this.fgInfo[addr];
           const key = detectAgentKey(p, t, a, fg);
+          // Skip an agent that isn't working and hasn't changed in its last two queries (its
+          // turn's final numbers can land just after its state changes), for up to IDLE_EVERY.
+          const act = activity[addr];
+          const prev = this.seen[addr];
+          const now = Date.now();
+          if (key && act && !force && !act.working && prev?.stable && prev.key === act.key && now - prev.at < IDLE_EVERY && this.cache[addr]) continue;
+          if (key && act) this.seen[addr] = { key: act.key, stable: prev?.key === act.key, at: now };
           if (key) {
             reqList.push({
               terminal: addr,
@@ -322,16 +345,18 @@ export default class AgentUsageBar extends View {
           }
         }
         if (titlesChanged) setShared("agent.titles", nextTitles);
-        cx.notify();
       } catch {
         // ignore transient errors
       } finally {
+        if (this.shownState() !== before) cx.notify();
         this.busy = false;
         if (this.pendingRefresh) {
           const again = this.pendingAll;
+          const forced = this.pendingForce;
           this.pendingRefresh = false;
           this.pendingAll = false;
-          this.refresh(cx, again);
+          this.pendingForce = false;
+          this.refresh(cx, again, forced);
         }
       }
     });
@@ -368,7 +393,7 @@ export default class AgentUsageBar extends View {
         .border_color(t.border)
         .text_size(11.5)
         .text_color(t.dim)
-        .on_click((_e, cx) => this.refresh(cx))
+        .on_click((_e, cx) => this.refresh(cx, false, true))
         .child("No active agent in this tab");
     }
 
@@ -411,14 +436,14 @@ export default class AgentUsageBar extends View {
       .id("agent-usage-bar")
       .size_full()
       .px(14)
-      .gap(16)
+      .gap(6)
       .items_center()
       .bg(t.chrome)
       .border_t(1)
       .border_color(t.border)
       .text_size(11.5)
       .text_color(t.muted)
-      .on_click((_e, cx) => this.refresh(cx))
+      .on_click((_e, cx) => this.refresh(cx, false, true))
       .child(
         h_flex()
           .gap(6)
@@ -433,6 +458,7 @@ export default class AgentUsageBar extends View {
           .child(div().text_color(t.dim).child("Context:"))
           .child(colorPercent(ctxVal, ctxColor, t.muted)),
       )
+      .child(div().text_color(t.dim).child("·"))
       .child(
         h_flex()
           .gap(6)

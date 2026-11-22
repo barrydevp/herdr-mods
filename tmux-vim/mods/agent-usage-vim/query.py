@@ -646,7 +646,13 @@ def fetch_claude_oauth_usage(network=True):
     cache_path = os.path.join(USAGE_DIR, "claude-oauth-usage.json")
     now = time.time()
     cached = read_json(cache_path)
-    if isinstance(cached, dict) and now - float(cached.get("_fetched_at") or 0) < 60:
+    if not isinstance(cached, dict):
+        cached = {}
+    if now - float(cached.get("_fetched_at") or 0) < 60:
+        return cached.get("data")
+    # After a failure, wait before asking again (longer when told to slow down): the bar
+    # refreshes every few seconds, and offline each try would wait out the timeout.
+    if now < float(cached.get("_retry_at") or 0):
         return cached.get("data")
 
     if not network:
@@ -654,7 +660,7 @@ def fetch_claude_oauth_usage(network=True):
     creds = read_claude_credentials()
     token = (creds.get("claudeAiOauth") or {}).get("accessToken")
     if not token:
-        return cached.get("data") if isinstance(cached, dict) else None
+        return cached.get("data")
 
     try:
         req = urllib.request.Request(
@@ -672,8 +678,20 @@ def fetch_claude_oauth_usage(network=True):
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump({"_fetched_at": now, "data": data}, f)
         return data
-    except Exception:
-        return cached.get("data") if isinstance(cached, dict) else None
+    except Exception as e:
+        wait = 60
+        if getattr(e, "code", None) == 429:
+            try:
+                wait = max(300, int(e.headers.get("Retry-After") or 0))
+            except Exception:
+                wait = 300
+        try:
+            os.makedirs(USAGE_DIR, exist_ok=True)
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump({**cached, "_retry_at": now + wait}, f)
+        except Exception:
+            pass
+        return cached.get("data")
 
 
 def format_claude_model(m_str):
