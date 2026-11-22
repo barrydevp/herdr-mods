@@ -1,6 +1,23 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { spaces, panes, agents, terminals, focused, theme, exec, hc, appHome, window, checking, shared, setShared } from "herdr";
+import { spaces, panes, agents, terminals, focused, theme, exec, hc, appHome, window, checking, shared, setShared, props, readTextFile } from "herdr";
+
+// The shown tab's terminals are looked at this often; every agent (for the titles
+// the sidebars show) less often.
+const TAB_EVERY = 4000;
+const ALL_EVERY = 30000;
+
+// "5h 87% left (1h 59m)": the percentages in `color`, the rest in `rest`. Each piece is its
+// own text run, so spaces at a piece's edge become non-breaking to survive layout.
+function colorPercent(text, color, rest) {
+  const parts = String(text).split(/(\d+(?:\.\d+)?%)/).filter(Boolean);
+  return h_flex().children(parts.map((s) =>
+    div().text_color(/^\d+(?:\.\d+)?%$/.test(s) ? color : rest).child(s.replace(/ /g, " "))));
+}
+
+// `mac/t2` -> "mac" and "t2"; a bare `t2` is on this computer (null).
+const machineOf = (addr) => (addr.includes("/") ? addr.slice(0, addr.lastIndexOf("/")) : null);
+const localId = (addr) => addr.slice(addr.lastIndexOf("/") + 1);
 
 const ICONS = {
   antigravity: { icon: "icons/antigravity.svg", tint: false },
@@ -16,7 +33,8 @@ function detectAgentKey(p, t, a, fg) {
     if (fgLow.includes("claude")) return "claude";
     if (fgLow.includes("agy") || fgLow.includes("antigravity")) return "antigravity";
     // If foreground is explicitly a shell (pwsh, powershell, cmd, bash, zsh), no agent is running in the foreground
-    if (/^(pwsh|powershell|cmd|bash|zsh|fish|nu|sh)(\.exe)?$/i.test(fg.name)) {
+    // (a login shell's name starts with "-" on macOS and Linux: "-zsh")
+    if (/^-?(pwsh|powershell|cmd|bash|zsh|fish|nu|sh|dash|ksh|tcsh|xonsh)(\.exe)?$/i.test(fg.name.split(/[\\/]/).pop())) {
       return null;
     }
   }
@@ -49,11 +67,70 @@ export default class AgentUsageBar extends View {
     this.lastSig = "";
     this.busy = false;
     this.pendingRefresh = false;
+    this.pendingAll = false;
+    this.py = {}; // machine ("" here) -> the Python 3 command that works there; null: none
+    this.remote = {}; // machine -> { want, path } of its query.py copy
+    this.src = null; // query.py's text, for copies on other machines
     if (checking()) return;
-    this.refresh(cx);
-    cx.timer.every(4000, (cx) => {
+    this.refresh(cx, true);
+    cx.timer.every(TAB_EVERY, (cx) => {
       if (window().active) this.refresh(cx);
     });
+    cx.timer.every(ALL_EVERY, (cx) => {
+      if (window().active) this.refresh(cx, true);
+    });
+  }
+
+  // The Python 3 command on a machine (null: this computer). `python3` is the Microsoft
+  // Store stub on Windows, and often the only name on macOS and Linux.
+  async python(m) {
+    const k = m ?? "";
+    if (this.py[k] !== undefined) return this.py[k];
+    const names = !m && window()?.platform === "windows" ? ["python", "py"] : ["python3", "python", "py"];
+    for (const cmd of names) {
+      try {
+        const r = await exec(cmd, ["-c", "import sys; sys.exit(0 if sys.version_info >= (3, 7) else 1)"], { on: m, timeout: 8000 });
+        if (r.code === 0) return (this.py[k] = cmd);
+      } catch (e) {
+        if (m && /unreachable|connect|machine/i.test(String(e?.message ?? e))) return null; // away: ask again later
+      }
+    }
+    return (this.py[k] = null);
+  }
+
+  // query.py where Python can run it: here, the mod's own file; on another machine, a copy in
+  // its ~/.cache/herdr-agent-usage, written once per version. Remote commands go through the
+  // local `hc`, whose command line Windows caps at 32k characters, so it goes in pieces.
+  async script(py, m) {
+    const local = `${appHome()}/mods/agent-usage-vim/query.py`;
+    if (!m) return local;
+    this.src ??= await readTextFile(local);
+    if (!this.src) return null;
+    let h = 5381;
+    for (let i = 0; i < this.src.length; i++) h = ((h * 33) ^ this.src.charCodeAt(i)) >>> 0;
+    const want = `~/.cache/herdr-agent-usage/query-${h.toString(16)}.py`;
+    if (this.remote[m]?.want === want) return this.remote[m].path;
+    const has = await exec(py, ["-c", "import os,sys;p=os.path.expanduser(sys.argv[1]);print(p);sys.exit(0 if os.path.exists(p) else 1)", want], { on: m, timeout: 8000 });
+    const path = has.stdout.trim();
+    if (!path) return null;
+    if (has.code !== 0) {
+      const write = [
+        "import os,sys,glob",
+        "p,mode,text,last=sys.argv[1:5]",
+        "os.makedirs(os.path.dirname(p),exist_ok=True)",
+        "open(p+'.part',mode,encoding='utf-8',newline='').write(text)",
+        "if last=='1':",
+        "  os.replace(p+'.part',p)",
+        "  [os.remove(f) for f in glob.glob(os.path.join(os.path.dirname(p),'query-*.py')) if f!=p]",
+      ].join("\n");
+      const CHUNK = 8000;
+      for (let i = 0; i < this.src.length; i += CHUNK) {
+        const r = await exec(py, ["-c", write, path, i ? "a" : "w", this.src.slice(i, i + CHUNK), i + CHUNK >= this.src.length ? "1" : "0"], { on: m, timeout: 15000 });
+        if (r.code !== 0) return null;
+      }
+    }
+    this.remote[m] = { want, path };
+    return path;
   }
 
   target() {
@@ -127,33 +204,52 @@ export default class AgentUsageBar extends View {
     };
   }
 
-  collectCandidateTerminals() {
+  // What the bar can show (the focused terminal, else an agent in the shown tab);
+  // with `all`, every agent too, for the titles the sidebars read. Terminals on other
+  // machines (`mac/t2`) are asked about there, where their agents keep their files.
+  collectCandidateTerminals(all) {
     const f = focused();
-    const allPanes = panes();
-    const allAgents = agents();
+    const tabId = f?.tab ?? spaces().find((s) => s.active)?.tabs?.find((tb) => tb.active)?.id ?? null;
     const addrs = new Set();
 
     if (f?.shown) addrs.add(f.shown);
     if (f?.terminal) addrs.add(f.terminal);
-    for (const p of allPanes) {
-      if (p.terminal) addrs.add(p.terminal);
+    for (const p of panes()) {
+      if (p.terminal && p.tab === tabId) addrs.add(p.terminal);
     }
-    for (const a of allAgents) {
-      if (a.address) addrs.add(a.address);
+    if (all) {
+      for (const a of agents()) {
+        if (a.address) addrs.add(a.address);
+      }
     }
-    return Array.from(addrs).filter((addr) => addr && !addr.includes("/"));
+    return Array.from(addrs).filter(Boolean);
   }
 
-  refresh(cx) {
+  // Forget terminals that ended: their address can come back for a new one.
+  prune() {
+    const all = terminals();
+    if (!all.length) return; // right after a start the list is empty
+    const live = new Set(all.filter((t) => t.state === "live").map((t) => t.address));
+    for (const k of Object.keys(this.fgInfo)) if (!live.has(k)) delete this.fgInfo[k];
+    for (const k of Object.keys(this.cache)) if (!live.has(k)) delete this.cache[k];
+    const titles = shared("agent.titles");
+    if (titles && typeof titles === "object" && Object.keys(titles).some((k) => !live.has(k))) {
+      setShared("agent.titles", Object.fromEntries(Object.entries(titles).filter(([k]) => live.has(k))));
+    }
+  }
+
+  refresh(cx, all = false) {
     if (checking()) return;
     if (this.busy) {
       this.pendingRefresh = true;
+      this.pendingAll ||= all;
       return;
     }
     this.busy = true;
     cx.spawn(async (cx) => {
       try {
-        const addrs = this.collectCandidateTerminals();
+        if (all) this.prune();
+        const addrs = this.collectCandidateTerminals(all);
         for (const addr of addrs) {
           try {
             const r = await hc(["get", addr, "--json"]);
@@ -174,6 +270,8 @@ export default class AgentUsageBar extends View {
         const termMap = new Map(allTerms.map((t) => [t.address, t]));
         const agentMap = new Map(allAgents.map((a) => [a.address, a]));
 
+        // Layout props: "claude_usage_api": false keeps the Claude limits off the network.
+        const network = props()?.claude_usage_api !== false;
         const reqList = [];
         for (const addr of addrs) {
           const p = allPanes.find((x) => x.terminal === addr);
@@ -188,38 +286,52 @@ export default class AgentUsageBar extends View {
               cwd: fg?.cwd ?? p?.cwd ?? t?.cwd ?? "",
               pid: fg?.pid ?? null,
               argv: fg?.argv ?? null,
+              network,
             });
           }
         }
 
-        if (reqList.length > 0) {
-          const scriptPath = `${appHome()}/mods/agent-usage-vim/query.py`;
-          const res = await exec("python", [scriptPath, JSON.stringify(reqList)], { timeout: 5000 });
-          if (res.code === 0 && res.stdout) {
-            const parsed = JSON.parse(res.stdout.trim());
-            if (parsed && typeof parsed === "object") {
-              this.cache = { ...this.cache, ...parsed };
-              const prevTitles = shared("agent.titles") ?? {};
-              const nextTitles = { ...(typeof prevTitles === "object" && prevTitles ? prevTitles : {}) };
-              let titlesChanged = false;
-              for (const [tid, info] of Object.entries(parsed)) {
-                if (info?.title && nextTitles[tid] !== info.title) {
-                  nextTitles[tid] = info.title;
-                  titlesChanged = true;
-                }
-              }
-              if (titlesChanged) setShared("agent.titles", nextTitles);
-            }
+        // One run per machine, each with its own terminal ids (`mac/t2` is `t2` there).
+        const byMachine = new Map();
+        for (const req of reqList) {
+          const m = machineOf(req.terminal);
+          if (!byMachine.has(m)) byMachine.set(m, []);
+          byMachine.get(m).push({ ...req, terminal: localId(req.terminal) });
+        }
+        const parsed = {};
+        for (const [m, reqs] of byMachine) {
+          try {
+            const py = await this.python(m);
+            const script = py && (await this.script(py, m));
+            if (!script) continue;
+            const res = await exec(py, [script, JSON.stringify(reqs)], { on: m, timeout: 10000 });
+            const out = res.code === 0 && res.stdout ? JSON.parse(res.stdout.trim()) : null;
+            for (const [tid, info] of Object.entries(out && typeof out === "object" ? out : {})) parsed[m ? `${m}/${tid}` : tid] = info;
+          } catch {
+            // that machine is away or its run failed: keep what it showed
           }
         }
+        this.cache = { ...this.cache, ...parsed };
+        const prevTitles = shared("agent.titles") ?? {};
+        const nextTitles = { ...(typeof prevTitles === "object" && prevTitles ? prevTitles : {}) };
+        let titlesChanged = false;
+        for (const [tid, info] of Object.entries(parsed)) {
+          if (info?.title && nextTitles[tid] !== info.title) {
+            nextTitles[tid] = info.title;
+            titlesChanged = true;
+          }
+        }
+        if (titlesChanged) setShared("agent.titles", nextTitles);
         cx.notify();
       } catch {
         // ignore transient errors
       } finally {
         this.busy = false;
         if (this.pendingRefresh) {
+          const again = this.pendingAll;
           this.pendingRefresh = false;
-          this.refresh(cx);
+          this.pendingAll = false;
+          this.refresh(cx, again);
         }
       }
     });
@@ -260,6 +372,21 @@ export default class AgentUsageBar extends View {
         .child("No active agent in this tab");
     }
 
+    const where = machineOf(cur.terminal);
+    if (this.py[where ?? ""] === null) {
+      return h_flex()
+        .id("agent-usage-bar")
+        .size_full()
+        .px(14)
+        .items_center()
+        .bg(t.chrome)
+        .border_t(1)
+        .border_color(t.border)
+        .text_size(11.5)
+        .text_color(t.dim)
+        .child(`Agent usage needs Python 3 on ${where ?? "this computer"} (python3, or python / py on Windows)`);
+    }
+
     const data = this.cache[cur.terminal] ?? null;
     const agentKey = data?.agent_key ?? cur.agent;
     const modelLabel = data?.model ? `${data.agent} · ${data.model}` : cur.agent === "codex" ? "Codex" : cur.agent === "claude" ? "Claude Code" : "Antigravity";
@@ -267,16 +394,17 @@ export default class AgentUsageBar extends View {
     const limitItems = Array.isArray(data?.limit_items) && data.limit_items.length ? data.limit_items : [{ text: "loading…", pct: null }];
 
     const ctxPct = data?.context_pct ?? 0;
-    const ctxColor = ctxPct >= 85 ? t.blocked : ctxPct >= 60 ? (t.working ?? t.ansi3) : t.muted;
+    // Only a number that needs you is colored: terminal yellow to watch, red to act.
+    const ctxColor = ctxPct >= 85 ? t.ansi1 : ctxPct >= 60 ? t.ansi3 : t.foreground;
 
-    const itemColor = (pct) => (pct != null && pct <= 5 ? t.blocked : pct != null && pct <= 20 ? (t.working ?? t.ansi3) : t.muted);
+    const itemColor = (pct) => (pct != null && pct <= 5 ? t.ansi1 : pct != null && pct <= 20 ? t.ansi3 : t.foreground);
 
     const pic = this.renderIcon(t, agentKey, cur.program);
 
     const rightChildren = [div().text_color(t.dim).child("Limit:")];
     limitItems.forEach((item, idx) => {
       if (idx > 0) rightChildren.push(div().text_color(t.dim).child("·"));
-      rightChildren.push(div().text_color(itemColor(item.pct)).child(item.text));
+      rightChildren.push(colorPercent(item.text, itemColor(item.pct), t.muted));
     });
 
     return h_flex()
@@ -298,9 +426,12 @@ export default class AgentUsageBar extends View {
           .flex_none()
           .when(Boolean(pic), (el) => el.child(pic))
           .child(div().text_color(t.foreground).font_medium().child(modelLabel))
+          // The reasoning effort the agent runs at (low … max, as its model names them).
+          .when(Boolean(data?.effort), (el) => el
+            .child(div().px(5).rounded(4).bg(t.raised).text_size(10.5).text_color(t.muted).child(data.effort)))
           .child(div().text_color(t.dim).child("·"))
           .child(div().text_color(t.dim).child("Context:"))
-          .child(div().text_color(ctxColor).child(ctxVal)),
+          .child(colorPercent(ctxVal, ctxColor, t.muted)),
       )
       .child(
         h_flex()

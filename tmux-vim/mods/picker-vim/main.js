@@ -75,7 +75,7 @@ export default class PickerVim extends View {
     });
   }
 
-  close() {
+  dismiss() {
     if (props()?.overlay) closeOverlay(props().overlay);
   }
 
@@ -146,7 +146,7 @@ export default class PickerVim extends View {
       cx.notify();
       return;
     }
-    this.close();
+    this.dismiss();
     if (r.kind === "ctx") run("tab.select", { id: r.ctx.id });
     else if (r.kind === "new") run("tab.new");
     else if (r.kind === "space") run("space.new", { machine: r.machine ?? "" });
@@ -277,7 +277,7 @@ export default class PickerVim extends View {
         const ctrl = m.control && !m.alt && !m.platform;
         if (k === "escape" || (ctrl && k === "[")) {
           cx.stop_propagation();
-          this.close();
+          this.dismiss();
           return;
         }
         if (!pickable.length) return;
@@ -291,7 +291,7 @@ export default class PickerVim extends View {
           this.at = Math.max(this.at - HALF_PAGE, 0);
         } else if (ctrl && k === "x") {
           if (sel?.kind === "ctx") {
-            this.close();
+            this.dismiss();
             run("tab.close", { id: sel.ctx.id });
           }
         } else return;
@@ -312,7 +312,7 @@ export default class PickerVim extends View {
               .text_color(t.dim)
               .cursor_pointer()
               .hover((s) => s.bg(t.hover).text_color(t.foreground))
-              .on_click(() => this.close())
+              .on_click(() => this.dismiss())
               .child("Esc"),
           ),
       )

@@ -45,7 +45,7 @@ export default class HelpVim extends View {
     cx.timer.after(600, () => this.input.focus());
   }
 
-  close() {
+  dismiss() {
     if (props()?.overlay) closeOverlay(props().overlay);
   }
 
@@ -110,7 +110,7 @@ export default class HelpVim extends View {
         const ctrl = m.control && !m.alt && !m.platform;
         if (k === "escape" || (ctrl && k === "[")) {
           cx.stop_propagation();
-          this.close();
+          this.dismiss();
           return;
         }
         if (k === "down" || (ctrl && k === "n")) {
@@ -148,7 +148,7 @@ export default class HelpVim extends View {
               .text_color(t.dim)
               .cursor_pointer()
               .hover((s) => s.bg(t.hover).text_color(t.foreground))
-              .on_click(() => this.close())
+              .on_click(() => this.dismiss())
               .child("Esc"),
           ),
       )

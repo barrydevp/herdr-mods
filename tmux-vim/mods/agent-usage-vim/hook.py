@@ -29,7 +29,7 @@ def extract_agy_first_prompt(cid, transcript_path=None):
         paths.append(os.path.join(AGY_DIR, "brain", cid, ".system_generated", "logs", "transcript.jsonl"))
     if transcript_path:
         paths.append(transcript_path)
-        paths.append(transcript_path.replace("\\antigravity\\", "\\antigravity-cli\\"))
+        paths.append(transcript_path.replace("\\antigravity\\", "\\antigravity-cli\\").replace("/antigravity/", "/antigravity-cli/"))
     for p in paths:
         if not p or not os.path.exists(p):
             continue
@@ -53,10 +53,11 @@ def extract_agy_first_prompt(cid, transcript_path=None):
 
 
 def claude_project_slug(cwd):
+    # Claude Code names a project's folder after its path, every non-alphanumeric as "-".
     if not cwd:
         return ""
     p = str(cwd).strip().rstrip("\\/")
-    return p.replace(":\\", "--").replace("\\", "-").replace("/", "-").replace(":", "-")
+    return re.sub(r"[^A-Za-z0-9]", "-", p)
 
 
 def extract_claude_session_title(data, cwd):
@@ -151,10 +152,30 @@ def set_terminal_title(title):
     if not safe:
         return
     try:
-        with open("CONOUT$", "w", encoding="utf-8") as con:
+        # The agent's own terminal: its console on Windows, its tty elsewhere.
+        with open("CONOUT$" if os.name == "nt" else "/dev/tty", "w", encoding="utf-8") as con:
             con.write(f"\x1b]2;{safe}\x07")
             con.flush()
     except Exception:
+        pass
+
+
+def prune(max_age=7 * 86400):
+    # Statuslines run every few seconds: look for week-old session files at most hourly.
+    marker = os.path.join(OUT_DIR, ".pruned")
+    now = time.time()
+    try:
+        if now - os.path.getmtime(marker) < 3600:
+            return
+    except OSError:
+        pass
+    try:
+        for e in os.scandir(OUT_DIR):
+            if e.name.endswith(".json") and not e.name.endswith("-latest.json") and now - e.stat().st_mtime > max_age:
+                os.remove(e.path)
+        with open(marker, "w"):
+            pass
+    except OSError:
         pass
 
 
@@ -169,6 +190,7 @@ def main():
         data["_hc_terminal_id"] = term_id
 
         os.makedirs(OUT_DIR, exist_ok=True)
+        prune()
 
         product = (data.get("product") or "").lower()
         prefix = "agy" if ("antigravity" in product or "quota" in data or "conversation_id" in data) else "claude"

@@ -43,6 +43,10 @@ const RAIL_CELL = 32;
 // stays readable instead of turning into an ellipsis next to a long branch.
 const SIDE_MIN = 48;
 const railCell = (el) => h_flex().flex_none().justify_center().child(el);
+// A machine header's keyboard stop ("head:" + its name, "" for this computer); space ids never start so.
+const headId = (m) => `head:${m ?? ""}`;
+const isHead = (id) => typeof id === "string" && id.startsWith("head:");
+const headMachine = (id) => id.slice(5) || null;
 const where = (s, cwds) => JSON.stringify([s.machine ?? null, place(s, cwds)]);
 const base = (path) => path.replace(/\/+$/, "").split("/").pop();
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
@@ -179,7 +183,7 @@ export default class Spaces extends View {
     if (window().active) {
       for (const k of keys) {
         const asks = this.git[k] || this.unsure.has(k);
-        if (asks && !this.folded.has(parsed.get(k)[0]) && now - (this.checked[k] ?? 0) > FALLBACK) due.add(k);
+        if (asks && !(this.grouping && this.folded.has(parsed.get(k)[0])) && now - (this.checked[k] ?? 0) > FALLBACK) due.add(k);
       }
     }
     return due;
@@ -392,11 +396,19 @@ export default class Spaces extends View {
   grouped(sp, t, collapsed, hasFocus, colors) {
     const machs = machines();
     const rows = this.ordered(sp, machs);
-    const visibleRows = rows.filter((r) => !this.folded.has(r.w.machine ?? null));
-    this.navIds = visibleRows.map((r) => r.w.id);
+    const remote = [...new Set([...rows.map(r => r.w.machine).filter(Boolean), ...this.machines.map(m => m.name), ...Object.keys(this.reconnecting)])].sort();
+    // Machine headers (and so folding) show only once a machine isn't this computer.
+    this.grouping = remote.length > 0;
+    const machineOf = (m) => this.machines.find(k => k.name === m) ?? this.reconnecting[m]?.machine;
+    const headerOnly = (m) => !collapsed && (this.rebuilt(machineOf(m)) || !!this.reconnecting[m]);
+    // Keyboard stops in list order: each shown header (it folds), then its open spaces.
+    this.navIds = this.grouping
+      ? [null, ...remote].flatMap((m) => [headId(m), ...(this.folded.has(m) || headerOnly(m) ? [] : rows.filter((r) => (r.w.machine ?? null) === m).map((r) => r.w.id))])
+      : rows.map((r) => r.w.id);
     this.rowIndex = new Map();
-    if (!this.cursor || !this.navIds.includes(this.cursor)) {
-      this.cursor = sp.find((s) => s.active)?.id ?? this.navIds[0] ?? null;
+    const navigable = (id) => Boolean(id) && this.navIds.includes(id);
+    if (!navigable(this.cursor)) {
+      this.cursor = [sp.find((s) => s.active)?.id].find(navigable) ?? this.navIds[0] ?? null;
     }
     const fromIndex = this.pressed === null ? -1 : sp.findIndex(s => s.id === this.pressed);
     const pressedSpace = this.pressed === null ? null : sp[fromIndex] ?? null;
@@ -405,7 +417,6 @@ export default class Spaces extends View {
     // children, and machine headers, login notes and loading rows count too.
     this.activeAt = -1;
     let before = 0;
-    const remote = [...new Set([...rows.map(r => r.w.machine).filter(Boolean), ...this.machines.map(m => m.name), ...Object.keys(this.reconnecting)])].sort();
     const loading = m => {
       const layout = machs.find(k => k.name === m)?.layout;
       return layout === "loading" || (!layout && this.machines.some(k => k.name === m && k.state === "connected"))
@@ -427,9 +438,12 @@ export default class Spaces extends View {
       const rebuilt = this.rebuilt(machine) || !!repair;
       const login = machine?.state === "needs_login" ? `hc machine login ${m}` : null;
       const folded = this.folded.has(m);
+      const headCursor = hasFocus && this.cursor === headId(m);
+      this.rowIndex.set(headId(m), before);
       const icon = svg(`mods/workspace-chrome/${m ? "server" : "monitor"}.svg`).size(13).flex_none();
       const badge = div().absolute().right(-3).bottom(-2).size(6).rounded(3).border_1().border_color(t.chrome).bg(connected ? t.ansi2 : t.dim);
-      const head = h_flex().id(`machine-${m ?? "local"}`).h(26).flex_none().px(collapsed ? 0 : 8).gap(7).items_center().text_size(11).text_color(t.dim)
+      const head = h_flex().id(`machine-${m ?? "local"}`).h(26).flex_none().px(collapsed ? 0 : 8).gap(7).items_center().rounded(6).text_size(11).text_color(t.dim)
+        .when(headCursor, el => el.border_1().border_color(t.accent))
         .when(collapsed, el => el.mt(4).w(RAIL_CELL).justify_center().rounded(6).tooltip(login ? `${m} needs a login: run ${login}. Click for Copy.` : m ? `${m} · ${connected ? "connected" : (machine?.state ?? "asleep").replace(/_/g, " ")}` : "This computer"))
         .cursor_pointer().hover(s => s.bg(t.hover))
         .on_click((_e, cx) => {
@@ -662,10 +676,31 @@ export default class Spaces extends View {
       return;
     }
 
+    const target = this.cursor ?? ids[0];
+    const setFold = (m, on) => {
+      on ? this.folded.add(m) : this.folded.delete(m);
+      localStorage.setItem("machines.folded", JSON.stringify([...this.folded]));
+      cx.notify();
+    };
+
+    // On a machine header: Enter / Space / o toggle it, l / right opens it (or steps in),
+    // h / left folds it, n / a / + makes a space there. Other space keys do nothing here.
+    if (isHead(target)) {
+      const m = headMachine(target);
+      const folded = this.folded.has(m);
+      this.pendingG = false;
+      if (e.key === "enter" || e.key === "space" || key === "o") setFold(m, !folded);
+      else if (key === "l" || e.key === "right") folded ? setFold(m, false) : moveTo(idx + 1);
+      else if (key === "h" || e.key === "left") { if (!folded) setFold(m, true); }
+      else if (key === "n" || key === "a" || key === "+") run("space.new", { machine: m ?? "" });
+      else if (!["r", "d", "x", "m"].includes(key)) return;
+      cx.stop_propagation();
+      return;
+    }
+
     // Space / o: switch space but keep keyboard focus inside Spaces list
     if (e.key === "space" || key === "o") {
       this.pendingG = false;
-      const target = this.cursor ?? ids[0];
       if (target) {
         run("space.select", { id: target });
         this.watchFocus(cx);
@@ -677,7 +712,6 @@ export default class Spaces extends View {
     // Enter / l / right: switch to space and focus its terminal pane
     if (e.key === "enter" || key === "l" || e.key === "right") {
       this.pendingG = false;
-      const target = this.cursor ?? ids[0];
       const current = spaces().find((s) => s.active)?.id;
       run("pane.go", { direction: "right" });
       if (target && target !== current) {
@@ -688,16 +722,17 @@ export default class Spaces extends View {
       return;
     }
 
-    // h / left: fold current space's machine group (or unfold if none)
+    // h / left: fold this space's machine group and put the cursor on its header, so l opens
+    // it again. Without machine headers (one machine) there is nothing to fold.
     if (key === "h" || e.key === "left") {
       this.pendingG = false;
-      const sp = spaces().find((s) => s.id === (this.cursor ?? ids[0]));
-      if (sp) {
-        const machine = sp.machine ?? null;
-        if (this.folded.has(machine)) this.folded.delete(machine);
-        else this.folded.add(machine);
-        localStorage.setItem("machines.folded", JSON.stringify([...this.folded]));
-        cx.notify();
+      const sp = spaces().find((s) => s.id === target);
+      if (sp && this.grouping) {
+        const m = sp.machine ?? null;
+        setFold(m, true);
+        this.cursor = headId(m);
+        const itemAt = this.rowIndex.get(this.cursor);
+        if (itemAt !== undefined) this.scroll.scroll_to_item(itemAt);
       }
       cx.stop_propagation();
       return;

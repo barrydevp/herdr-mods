@@ -318,9 +318,37 @@ export default class Agents extends View {
     }
 
     const current = items[idx] ?? items[0];
+    const enter = e.key === "enter";
+    const open = key === "l" || e.key === "right";
+    const fold = (id) => { this.folded.add(id); cx.notify(); };
+    const unfold = (id) => { this.folded.delete(id); cx.notify(); };
+    const cursorTo = (addr) => {
+      this.cursor = addr;
+      const rowAt = this.rowIndex.get(addr);
+      if (rowAt !== undefined) this.scroll.scroll_to_item(rowAt);
+    };
+
+    // On a group header: Enter toggles it, l / right opens it (or steps in), h / left folds it.
+    if (current?.group && (enter || open || key === "h" || e.key === "left")) {
+      this.pendingG = false;
+      const folded = this.folded.has(current.group);
+      if (enter) folded ? unfold(current.group) : fold(current.group);
+      else if (open) folded ? unfold(current.group) : moveTo(idx + 1);
+      else if (!folded) fold(current.group);
+      cx.stop_propagation();
+      return;
+    }
+
+    // l / right on an agent with folded sub-agents: show them.
+    if (open && current?.hasSubs && this.folded.has(current.address)) {
+      this.pendingG = false;
+      unfold(current.address);
+      cx.stop_propagation();
+      return;
+    }
 
     // Enter / l / right: focus agent's pane (or peek if sub-agent without pane)
-    if (e.key === "enter" || key === "l" || e.key === "right") {
+    if (enter || open) {
       this.pendingG = false;
       run("pane.go", { direction: "right" });
       if (current) {
@@ -336,7 +364,7 @@ export default class Agents extends View {
     // Space / p: peek at highlighted agent
     if (e.key === "space" || key === "p") {
       this.pendingG = false;
-      if (current) this.peek(current.address);
+      if (current && !current.group) this.peek(current.address);
       cx.stop_propagation();
       return;
     }
@@ -344,23 +372,24 @@ export default class Agents extends View {
     // P (Shift+p): toggle pin on highlighted agent
     if (key === "P") {
       this.pendingG = false;
-      if (current && !current.isSub) {
+      if (current && !current.isSub && !current.group) {
         run("terminal.pin", { terminal: current.address, pinned: !current.pinned });
       }
       cx.stop_propagation();
       return;
     }
 
-    // h / left: fold/unfold sub-agents or group
+    // h / left: fold the open sub-agents under this agent; otherwise fold what holds it
+    // (a sub-agent's parent, an agent's group) and put the cursor on that, so l opens it again.
     if (key === "h" || e.key === "left") {
       this.pendingG = false;
-      if (current) {
-        const foldKey = current.hasSubs ? current.address : current.groupId;
-        if (foldKey) {
-          if (this.folded.has(foldKey)) this.folded.delete(foldKey);
-          else this.folded.add(foldKey);
-          cx.notify();
-        }
+      if (current?.hasSubs && !this.folded.has(current.address)) fold(current.address);
+      else if (current?.isSub) {
+        fold(current.groupId);
+        cursorTo(current.groupId);
+      } else if (current?.groupId) {
+        fold(current.groupId);
+        cursorTo(`group:${current.groupId}`);
       }
       cx.stop_propagation();
       return;
@@ -439,7 +468,9 @@ export default class Agents extends View {
       });
     } else {
       for (const g of groups) {
-        visualRow++; // group header
+        // The header is a stop too, so a folded group can be opened again from the keyboard.
+        this.rowIndex.set(`group:${g.id}`, visualRow++);
+        navItems.push({ address: `group:${g.id}`, group: g.id, pane: null, pinned: false, isSub: false, hasSubs: false, groupId: null });
         if (this.folded.has(g.id)) continue;
         for (const a of g.members) {
           const subs = treeOf(a);
@@ -455,8 +486,9 @@ export default class Agents extends View {
       }
     }
     this.navItems = navItems;
-    if (!this.cursor || !navItems.some((item) => item.address === this.cursor)) {
-      this.cursor = shown ?? list.find((a) => a.focused)?.address ?? navItems[0]?.address ?? null;
+    const navigable = (addr) => Boolean(addr) && navItems.some((item) => item.address === addr);
+    if (!navigable(this.cursor)) {
+      this.cursor = [shown, list.find((a) => a.focused)?.address].find(navigable) ?? navItems[0]?.address ?? null;
     }
 
     const withKids = (a, i) => {
@@ -610,6 +642,7 @@ export default class Agents extends View {
     const header = (g) => {
       const open = !this.folded.has(g.id);
       const top = g.members.reduce((m, a) => ((RANK[a.status] ?? 0) > (RANK[m] ?? 0) ? a.status : m), null);
+      const isCursor = hasFocus && this.cursor === `group:${g.id}`;
       return h_flex()
         .id(g.id)
         .px(8)
@@ -618,6 +651,8 @@ export default class Agents extends View {
         .flex_none()
         .gap(6)
         .items_center()
+        .rounded(6)
+        .when(isCursor, (el) => el.bg(t.hover).border_1().border_color(t.accent))
         .text_size(11)
         .font_medium()
         .cursor_pointer()

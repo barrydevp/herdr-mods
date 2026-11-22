@@ -4,13 +4,18 @@ import re
 import json
 import glob
 import time
-import msvcrt
-import ctypes
-import ctypes.wintypes as wt
-import hashlib
 import sqlite3
+import subprocess
 import urllib.request
 from datetime import datetime
+
+IS_WIN = os.name == "nt"
+if IS_WIN:
+    import msvcrt
+    import ctypes
+    import ctypes.wintypes as wt
+else:
+    import fcntl
 
 HOME = os.path.expanduser("~")
 USAGE_DIR = os.path.join(HOME, ".config", "herdr-app", "data", "agent-usage")
@@ -28,8 +33,32 @@ def norm_path(p):
     return os.path.normcase(os.path.normpath(p)).rstrip("\\/")
 
 
+def parse_etime(text):
+    # ps etime: [[dd-]hh:]mm:ss
+    days, _, rest = text.strip().rpartition("-")
+    parts = [int(x) for x in rest.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    return (int(days) if days else 0) * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2]
+
+
 def get_proc_start_time(pid):
     if not pid:
+        return None
+    if not IS_WIN:
+        try:
+            stat = f"/proc/{int(pid)}/stat"
+            if os.path.exists(stat):
+                with open(stat) as f:
+                    start_ticks = int(f.read().rsplit(")", 1)[1].split()[19])
+                with open("/proc/stat") as f:
+                    btime = next(int(line.split()[1]) for line in f if line.startswith("btime"))
+                return btime + start_ticks / os.sysconf("SC_CLK_TCK")
+            r = subprocess.run(["ps", "-o", "etime=", "-p", str(int(pid))], capture_output=True, text=True, timeout=2)
+            if r.returncode == 0 and r.stdout.strip():
+                return time.time() - parse_etime(r.stdout)
+        except Exception:
+            pass
         return None
     try:
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -54,8 +83,15 @@ def is_file_locked(path):
         return False
     try:
         with open(path, "r+b") as f:
-            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
-            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            if IS_WIN:
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                # Either lock style may be the one the agent holds.
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                fcntl.lockf(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.lockf(f.fileno(), fcntl.LOCK_UN)
         return False
     except OSError:
         return True
@@ -134,6 +170,17 @@ def resolve_agy_conv_id(cwd):
         except Exception:
             pass
     return None
+
+
+def norm_effort(value):
+    v = re.sub(r"[^a-z]", "", str(value or "").lower())
+    return v or None
+
+
+def effort_in_name(name):
+    # Antigravity names its effort in the model: "Gemini 4 Neon (XHigh)".
+    m = re.search(r"\(([A-Za-z -]+)\)\s*$", str(name or ""))
+    return norm_effort(m.group(1)) if m else None
 
 
 def clean_line(text, max_len=60):
@@ -303,6 +350,7 @@ def query_agy(term_id, cwd, pid=None):
     window_size = 1048576
     used_pct = 0.0
     model_name = ""
+    effort = None
     conv_id = None
 
     if hook_data is not None:
@@ -311,6 +359,7 @@ def query_agy(term_id, cwd, pid=None):
         m_obj = hook_data.get("model") or {}
         if m_obj.get("display_name") or m_obj.get("id"):
             model_name = m_obj.get("display_name") or m_obj.get("id")
+        effort = norm_effort(m_obj.get("effort"))
         cw = hook_data.get("context_window") or {}
         if cw.get("context_window_size"):
             window_size = int(cw["context_window_size"])
@@ -350,6 +399,7 @@ def query_agy(term_id, cwd, pid=None):
 
     if not model_name:
         model_name = settings.get("model") or "Gemini"
+    effort = effort or effort_in_name(model_name) or effort_in_name(settings.get("model"))
 
     quota_source = hook_data if (hook_data and hook_data.get("quota")) else latest_hook
     quota_obj = (quota_source or {}).get("quota")
@@ -375,6 +425,7 @@ def query_agy(term_id, cwd, pid=None):
         "agent_key": "antigravity",
         "title": title,
         "model": format_agy_model(model_name),
+        "effort": effort,
         "context_value": ctx_val,
         "context_text": f"Context: {ctx_val}",
         "context_pct": round(used_pct, 1),
@@ -383,6 +434,22 @@ def query_agy(term_id, cwd, pid=None):
         "limit_min_pct": min_limit_pct,
         "plan": plan_tier,
     }
+
+
+def read_codex_config(key):
+    cfg_path = os.path.join(CODEX_DIR, "config.toml")
+    try:
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.lstrip().startswith("["):
+                        break  # top-level keys only, not a profile's
+                    m = re.match(r'^\s*' + re.escape(key) + r'\s*=\s*"([^"]+)"', line)
+                    if m:
+                        return m.group(1)
+    except Exception:
+        pass
+    return None
 
 
 def read_codex_config_model():
@@ -447,18 +514,27 @@ def query_codex(cwd, pid=None, argv=None):
     rate_limits = None
 
     # 1. Read context usage ONLY from the current process's matched session_rollout
+    effort = None
     if session_rollout and os.path.exists(session_rollout):
+        got_tokens = False
+        got_turn = False
         for line in reversed(read_tail_lines(session_rollout, 98304)):
             try:
                 d = json.loads(line)
                 payload = d.get("payload") or {}
-                if payload.get("type") == "token_count":
+                if not got_tokens and payload.get("type") == "token_count":
                     info = payload.get("info") or {}
                     last_u = info.get("last_token_usage") or {}
                     used_tokens = int(last_u.get("total_tokens") or 0)
                     if info.get("model_context_window"):
                         window_size = int(info["model_context_window"])
                     rate_limits = payload.get("rate_limits")
+                    got_tokens = True
+                elif not got_turn and d.get("type") == "turn_context":
+                    effort = norm_effort(payload.get("effort") or payload.get("reasoning_effort"))
+                    model_name = payload.get("model") or model_name
+                    got_turn = True
+                if got_tokens and got_turn:
                     break
             except Exception:
                 pass
@@ -480,6 +556,7 @@ def query_codex(cwd, pid=None, argv=None):
 
     if not model_name:
         model_name = read_codex_config_model()
+    effort = effort or norm_effort(read_codex_config("model_reasoning_effort"))
 
     used_pct = (used_tokens * 100.0 / max(1, window_size)) if window_size else 0.0
     pct_str = f"{used_pct:.1f}%".replace(".0%", "%") if 0 < used_pct < 10 else f"{int(round(used_pct))}%"
@@ -515,6 +592,7 @@ def query_codex(cwd, pid=None, argv=None):
         "agent": "Codex",
         "agent_key": "codex",
         "model": model_name,
+        "effort": effort,
         "context_value": ctx_val,
         "context_text": f"Context: {ctx_val}",
         "context_pct": round(used_pct, 1),
@@ -525,20 +603,55 @@ def query_codex(cwd, pid=None, argv=None):
 
 
 def claude_project_slug(cwd):
+    # Claude Code names a project's folder after its path, every non-alphanumeric as "-":
+    # C:\\Users\\me\\.claude -> C--Users-me--claude, /home/me/x_y -> -home-me-x-y
     if not cwd:
         return ""
     p = str(cwd).strip().rstrip("\\/")
-    return p.replace(":\\", "--").replace("\\", "-").replace("/", "-").replace(":", "-")
+    return re.sub(r"[^A-Za-z0-9]", "-", p)
 
 
-def fetch_claude_oauth_usage():
+# API context windows (platform.claude.com/docs/en/models/overview): 200K for these
+# older models, 1M for Opus 4.6+, Sonnet 4.6+, Haiku 5.5 and every Fable/Mythos model.
+# Claude Code may use less; its statusLine (hook.py) reports the real window.
+CLAUDE_200K = ("claude-3", "opus-4-5", "opus-4-1", "opus-4-0", "opus-4-2025", "sonnet-4-5", "sonnet-4-0", "sonnet-4-2025", "haiku-4-5")
+
+
+def claude_window(model):
+    low = (model or "").lower()
+    if "[1m]" in low:
+        return 1000000
+    if any(k in low for k in CLAUDE_200K):
+        return 200000
+    return 1000000
+
+
+def read_claude_credentials():
+    creds = read_json(os.path.join(CLAUDE_DIR, ".credentials.json"))
+    if not creds and sys.platform == "darwin":
+        # macOS keeps Claude Code's login in the Keychain, not in a file.
+        try:
+            r = subprocess.run(
+                ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                creds = json.loads(r.stdout)
+        except Exception:
+            creds = None
+    return creds if isinstance(creds, dict) else {}
+
+
+def fetch_claude_oauth_usage(network=True):
     cache_path = os.path.join(USAGE_DIR, "claude-oauth-usage.json")
     now = time.time()
     cached = read_json(cache_path)
     if isinstance(cached, dict) and now - float(cached.get("_fetched_at") or 0) < 60:
         return cached.get("data")
 
-    creds = read_json(os.path.join(CLAUDE_DIR, ".credentials.json")) or {}
+    if not network:
+        return None
+    creds = read_claude_credentials()
     token = (creds.get("claudeAiOauth") or {}).get("accessToken")
     if not token:
         return cached.get("data") if isinstance(cached, dict) else None
@@ -550,7 +663,7 @@ def fetch_claude_oauth_usage():
                 "Authorization": f"Bearer {token}",
                 "anthropic-beta": "oauth-2025-04-20",
                 "Accept": "application/json",
-                "User-Agent": "claude-code/2.1",
+                "User-Agent": "herdr-agent-usage",
             },
         )
         with urllib.request.urlopen(req, timeout=3.5) as resp:
@@ -578,8 +691,12 @@ def format_claude_model(m_str):
     return m_str
 
 
-def query_claude(term_id, cwd, pid=None):
+def query_claude(term_id, cwd, pid=None, network=True):
     proc_start = get_proc_start_time(pid)
+    # Claude Code's statusLine (hook.py), when wired: its own context window and session.
+    hook = read_json(os.path.join(USAGE_DIR, f"claude-term-{term_id}.json")) if term_id else None
+    if not isinstance(hook, dict) or (proc_start and float(hook.get("_updated_at") or 0) < proc_start - 5):
+        hook = None
 
     # 1. Exact PID -> sessionId lookup from ~/.claude/sessions/<pid>.json
     session_file = None
@@ -591,6 +708,8 @@ def query_claude(term_id, cwd, pid=None):
         candidate = os.path.join(CLAUDE_DIR, "projects", slug, f"{sid}.jsonl")
         if os.path.exists(candidate):
             session_file = candidate
+    elif hook and hook.get("transcript_path") and os.path.exists(hook["transcript_path"]):
+        session_file = hook["transcript_path"]
     else:
         # Fallback: look only inside the current cwd's project folder and only for files modified after proc_start
         slug = claude_project_slug(cwd)
@@ -602,8 +721,8 @@ def query_claude(term_id, cwd, pid=None):
                     session_file = files[0]
 
     used_tokens = 0
-    window_size = 200000
     model_name = ""
+    effort = None
     cost_usd = None
     custom_title = ""
     ai_title = ""
@@ -639,6 +758,8 @@ def query_claude(term_id, cwd, pid=None):
                         txt = content.strip()
                         if txt and not txt.startswith("<") and not txt.startswith("/"):
                             last_user_msg = clean_line(txt.splitlines()[0])
+                if not effort and t == "assistant" and d.get("effort"):
+                    effort = norm_effort(d.get("effort"))
                 if cost_usd is None and t == "cost-state":
                     cost_usd = d.get("totalCostUSD")
                 if used_tokens == 0 and t == "assistant":
@@ -664,17 +785,23 @@ def query_claude(term_id, cwd, pid=None):
         title = os.path.basename(str(cwd).rstrip("\\/"))
 
     if not model_name:
+        model_name = ((hook or {}).get("model") or {}).get("id") or ""
+    if not model_name:
         cl_settings = read_json(os.path.join(CLAUDE_DIR, "settings.json")) or {}
         model_name = cl_settings.get("model") or "sonnet"
 
-    if "1m" in (model_name or "").lower():
-        window_size = 1000000
+    effort = effort or norm_effort(((hook or {}).get("model") or {}).get("effort"))
+    cw = (hook or {}).get("context_window") or {}
+    window_size = int(cw.get("context_window_size") or 0) or claude_window(model_name)
+    cu = cw.get("current_usage")
+    if not used_tokens and isinstance(cu, dict):
+        used_tokens = sum(int(cu.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens"))
 
     used_pct = (used_tokens * 100.0 / max(1, window_size)) if window_size else 0.0
     pct_str = f"{used_pct:.1f}%".replace(".0%", "%") if 0 < used_pct < 10 else f"{int(round(used_pct))}%"
     ctx_val = f"{pct_str} ({fmt_tokens(used_tokens)} / {fmt_tokens(window_size)})"
 
-    oauth_usage = fetch_claude_oauth_usage()
+    oauth_usage = fetch_claude_oauth_usage(network)
     limit_items = []
     min_limit_pct = None
     now = time.time()
@@ -710,7 +837,7 @@ def query_claude(term_id, cwd, pid=None):
             limit_items.append({"text": txt, "pct": left_pct})
 
     if not limit_items:
-        creds = read_json(os.path.join(CLAUDE_DIR, ".credentials.json")) or {}
+        creds = read_claude_credentials()
         oauth = creds.get("claudeAiOauth") or {}
         sub = oauth.get("subscriptionType") or ""
         if sub:
@@ -726,6 +853,7 @@ def query_claude(term_id, cwd, pid=None):
         "agent_key": "claude",
         "title": title,
         "model": format_claude_model(model_name),
+        "effort": effort,
         "context_value": ctx_val,
         "context_text": f"Context: {ctx_val}",
         "context_pct": round(used_pct, 1),
@@ -741,11 +869,12 @@ def query_one(req):
     cwd = req.get("cwd") or ""
     pid = req.get("pid")
     argv = req.get("argv")
+    network = req.get("network") is not False
 
     if "codex" in agent_type:
         res = query_codex(cwd, pid=pid, argv=argv)
     elif "claude" in agent_type:
-        res = query_claude(term_id, cwd, pid=pid)
+        res = query_claude(term_id, cwd, pid=pid, network=network)
     else:
         res = query_agy(term_id, cwd, pid=pid)
 

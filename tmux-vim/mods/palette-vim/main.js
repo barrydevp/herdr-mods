@@ -2,7 +2,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { checking, commands, layouts, keys, run, theme, props, closeOverlay, openOverlay, shared, window as win } from "herdr";
+import { checking, commands, layouts, keys, run, theme, themes, props, closeOverlay, openOverlay, shared, window as win } from "herdr";
 
 const SHOWN = 10;
 const HALF_PAGE = 5;
@@ -51,7 +51,6 @@ const NAMED = [
   ["app.zoom_out", {}, "App", "Zoom out", "smaller font size"],
   ["app.zoom_reset", {}, "App", "Reset zoom", "font size"],
   ["app.quit", {}, "App", "Quit Herdr", "exit"],
-  ...["graphite", "ink", "moss", "atom-one-dark"].map((n) => ["app.theme", { name: n }, "App", `Theme: ${n.replace(/-/g, " ")}`, "colors look"]),
 ];
 
 const HIDDEN = new Set([
@@ -74,6 +73,11 @@ function entries() {
   const list = NAMED.filter(([n]) => known.has(n))
     .filter(([n]) => !(mac && n.startsWith("window.")))
     .map(([name, args, group, title, words]) => ({ name, args, group, title, words }));
+  if (known.has("app.theme")) {
+    for (const th of themes()) {
+      list.push({ name: "app.theme", args: { name: th.name }, group: "App", title: `Theme: ${th.name.replace(/-/g, " ")}`, words: `colors look ${th.light ? "light" : "dark"}` });
+    }
+  }
   for (const l of layouts()) {
     const t = { main: "Herdr", terminals: "Terminals", win98: "Herdr 98" }[l] ?? l.charAt(0).toUpperCase() + l.slice(1);
     list.push({ name: "layout.switch", args: { name: l }, group: "Layout", title: `Layout: ${t}`, words: `look ${l}` });
@@ -136,7 +140,7 @@ export default class PaletteVim extends View {
     cx.timer.after(600, () => this.input.focus());
   }
 
-  close() {
+  dismiss() {
     if (props()?.overlay) closeOverlay(props().overlay);
   }
 
@@ -144,7 +148,7 @@ export default class PaletteVim extends View {
     if (!e) return;
     this.recent = [e.id, ...this.recent.filter((r) => r !== e.id)].slice(0, 20);
     localStorage.setItem("recent", JSON.stringify(this.recent));
-    this.close();
+    this.dismiss();
     if (e.name === "mod.clone") {
       openOverlay({
         mod: "prompt",
@@ -274,7 +278,7 @@ export default class PaletteVim extends View {
         const ctrl = m.control && !m.alt && !m.platform;
         if (k === "escape" || (ctrl && k === "[")) {
           cx.stop_propagation();
-          this.close();
+          this.dismiss();
           return;
         }
         if (k === "down" || (ctrl && k === "n")) this.at = Math.min(this.at + 1, rows.length - 1);

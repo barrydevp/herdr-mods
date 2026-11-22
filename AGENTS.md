@@ -15,7 +15,7 @@ Before editing any mod, layout, or keybinding, read:
   - `layouts/main-vim.json`: Cloned `main` layout using `spaces-vim`, `agents-vim`, and `workspace-status-vim`.
   - `mods/spaces-vim/`: Focusable Spaces sidebar (`"focusable": true`) with `h/j/k/l` navigation and `watchFocus` focus ring management.
   - `mods/agents-vim/`: Focusable Agents sidebar (`"focusable": true`) with `h/j/k/l` navigation and `watchFocus` focus ring management.
-  - `mods/agent-usage-vim/`: Status bar below the pane terminal showing active agent context usage on the left and account limit/quota status on the right (`agy`, `codex`, `claude`).
+  - `mods/agent-usage-vim/`: Status bar below the pane terminal showing active agent context usage on the left and account limit/quota status on the right (`agy`, `codex`, `claude`). `query.py` / `hook.py` must stay Python 3.7+ standard library and run on Windows, macOS and Linux (a remote Mac has Python 3.8); agents on other machines are queried there via a copy in `~/.cache/herdr-agent-usage/`. It calls `api.anthropic.com` unless layout props set `"claude_usage_api": false`; keep RECIPE.md's disclosure current.
   - `mods/workspace-status-vim/`: Bottom status bar showing `Alt+Shift+P  commands` for `palette-vim`.
   - `mods/copy-mode/`: Top status pill for tmux-style `copy-mode-vi` (`Ctrl-Space [`).
   - `mods/picker-vim/`: Top popup space/tab/agent picker (`Alt-P` / `Ctrl-Space w`) with Vim navigation (`Ctrl-N/P`, `Ctrl-D/U`, `Ctrl-[`).
